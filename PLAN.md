@@ -62,18 +62,19 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Decision recorded in `docs/decision-step2.md`: **MRVDH direct, no sidecar; Level C included in v1**
 🟩 Plan's Critical Decisions table updated
 
-**Step 2b — PicnicClient implementation**
-🟥 Add `picnic-api@^4.0.0` dependency, pin exact version
-🟥 Write `src/picnic/client.ts` — thin `PicnicClient` wrapping only the methods we use: `login` (incl. 2FA), `getOrderHistory`, `searchProducts`, `getRecipes`, `getFavoriteRecipes`, `addToCart`, `removeFromCart`, `getCart`, `getDeliverySlots`, **`setDeliverySlot`** (Level C)
-🟥 Honour `DRY_RUN`: when set, all write methods (`addToCart`, `removeFromCart`, `setDeliverySlot`) log what they *would* do and return synthetic success; reads always go through
-🟥 Implement 2FA login flow: detect `second_factor_authentication_required`, request SMS via `auth.generate2FACode("SMS")`, accept code from caller, verify via `auth.verify2FA(code)`
-🟥 Persist long-lived token to `DATA_DIR/picnic-session.json` after first 2FA. File perms `0600`.
-🟥 Detect expired-token responses and emit an `AuthRequiredError` the Telegram layer can react to
-🟥 No credentials in logs, ever. A logging helper redacts known-sensitive fields.
-🟥 Manual smoke test: log in (with 2FA from Jeroen's phone), fetch last order, smoke `searchProducts`, verify session file is `0600` and credentials absent from logs
+**Step 2b — PicnicClient implementation** 🟨
+🟩 Add `picnic-api@4.4.0` dependency, pinned exact (note: the *actual* method names from the v4 type defs are `verify2FACode` not `verify2FA`, and order history is `delivery.getDeliveries(filter)` not a separate `getOrderHistory`)
+🟩 Write `src/picnic/client.ts` — thin `PicnicClient` wrapping `login` (incl. 2FA), `getDeliveries`, `searchProducts`, `getRecipesPage`, `addProductToCart`, `removeProductFromCart`, `getCart`, `getDeliverySlots`, **`setDeliverySlot`** (Level C)
+🟩 Honour `DRY_RUN`: all write methods are `Promise<void>` no-ops with a structured log line; reads always pass through
+🟩 Implement 2FA login flow: detect `second_factor_authentication_required`, request SMS via `auth.generate2FACode("SMS")`, verify via `auth.verify2FACode(code)`
+🟩 Persist long-lived token to `DATA_DIR/picnic-session.json` after first 2FA via atomic write (`writeFile` → `rename`); file perms `0600` (best-effort chmod on Windows, mandatory on Linux)
+🟩 Detect expired-token responses and emit `AuthRequiredError` (heuristic on `401`/`unauthorized` in error message, plus `response.status`)
+🟩 `safeLog` helper redacts `password`, `authKey`, `token`, `code`, `otp`, `secret` even if a caller accidentally passes them
+🟩 `src/picnic/index.ts` is the single import surface for downstream code
+🟥 **Manual smoke test (BLOCKED on Jeroen)**: run `npm run smoke:picnic` with real `.env`, complete 2FA from phone, verify deliveries fetch works, confirm `data/picnic-session.json` exists with `0600` perms and no credentials in logs
 
-**Step 2c — interface boundary**
-🟥 Downstream code (memory, agent, Telegram) talks to Picnic only via `PicnicClient` — no direct `picnic-api` imports elsewhere. Keeps future migrations (e.g. to a different wrapper) confined to one file.
+**Step 2c — interface boundary** 🟩
+🟩 Downstream code talks to Picnic only via `src/picnic/index.ts`; `picnic-api` is not imported anywhere outside `src/picnic/client.ts`. Verified by file inspection.
 
 ### Step 3 — Memory store
 🟥 Define SQLite schema: `orders`, `order_items`, `products_seen`, `suggestion_log` (kept for v2 diff observation), `chat_turns` (lightweight), `draft_cart` (current in-progress draft per conversation), `api_spend_daily` (for kill-switch)
