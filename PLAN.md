@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 0% (0/10 steps complete)
+**Overall Progress:** 10% (1/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -46,12 +46,13 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 ## Tasks
 
-### Step 1 — Project scaffolding
-🟥 Initialise Node.js + TypeScript project (`pnpm init`, `tsconfig.json`)
-🟥 Set up linter + formatter (eslint + prettier, light config)
-🟥 Create folder structure: `src/picnic/`, `src/agent/`, `src/memory/`, `src/telegram/`, `src/scheduler/`
-🟥 Set up `.env.example` and `.gitignore` (block `.env`, `*.db`, `profile.md`)
-🟥 Add `README.md` with one-paragraph what-this-is
+### Step 1 — Project scaffolding ✅
+🟩 Initialise Node.js + TypeScript project (`npm init`, `tsconfig.json`) — used npm instead of pnpm because pnpm wasn't installed; npm is bundled with Node and avoids an extra install
+🟩 Set up linter + formatter (eslint flat config + prettier, light)
+🟩 Create folder structure: `src/picnic/`, `src/agent/`, `src/memory/`, `src/telegram/`, `src/scheduler/` (with `.gitkeep` placeholders)
+🟩 Set up `.env.example` and `.gitignore` (block `.env`, `*.db`, `profile.md`)
+🟩 Add `README.md` with what-this-is, prereqs, local-dev commands, and branching policy
+🟩 Smoke tests pass: `npm run check`, `npm run lint`, `npm run format:check`, `npx tsx src/index.ts`
 
 ### Step 2 — Picnic adapter layer ⚠️ PRIVACY (credentials)
 
