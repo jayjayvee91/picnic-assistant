@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 10% (1/10 steps complete)
+**Overall Progress:** 20% (2/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -62,7 +62,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Decision recorded in `docs/decision-step2.md`: **MRVDH direct, no sidecar; Level C included in v1**
 🟩 Plan's Critical Decisions table updated
 
-**Step 2b — PicnicClient implementation** 🟨
+**Step 2b — PicnicClient implementation** ✅
 🟩 Add `picnic-api@4.4.0` dependency, pinned exact (note: the *actual* method names from the v4 type defs are `verify2FACode` not `verify2FA`, and order history is `delivery.getDeliveries(filter)` not a separate `getOrderHistory`)
 🟩 Write `src/picnic/client.ts` — thin `PicnicClient` wrapping `login` (incl. 2FA), `getDeliveries`, `searchProducts`, `getRecipesPage`, `addProductToCart`, `removeProductFromCart`, `getCart`, `getDeliverySlots`, **`setDeliverySlot`** (Level C)
 🟩 Honour `DRY_RUN`: all write methods are `Promise<void>` no-ops with a structured log line; reads always pass through
@@ -71,7 +71,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Detect expired-token responses and emit `AuthRequiredError` (heuristic on `401`/`unauthorized` in error message, plus `response.status`)
 🟩 `safeLog` helper redacts `password`, `authKey`, `token`, `code`, `otp`, `secret` even if a caller accidentally passes them
 🟩 `src/picnic/index.ts` is the single import surface for downstream code
-🟥 **Manual smoke test (BLOCKED on Jeroen)**: run `npm run smoke:picnic` with real `.env`, complete 2FA from phone, verify deliveries fetch works, confirm `data/picnic-session.json` exists with `0600` perms and no credentials in logs
+🟩 Manual smoke test passed: `npm run smoke:picnic` against Jeroen's real account; 2FA round-tripped via SMS; **234 completed deliveries** returned; session persisted; no credentials in logs. Most recent delivery's top-level keys: `delivery_id, creation_time, slot, eta2, status, delivery_time, orders` (informs Step 3 schema).
 
 **Step 2c — interface boundary** 🟩
 🟩 Downstream code talks to Picnic only via `src/picnic/index.ts`; `picnic-api` is not imported anywhere outside `src/picnic/client.ts`. Verified by file inspection.
