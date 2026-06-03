@@ -10,7 +10,7 @@
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Picnic integration | **TBD pending Step 2 investigation**: either MRVDH `picnic-api` direct, or `ivo-toby/mcp-picnic` as MCP sidecar | MCP sidecar option unlocks slot booking (Level C) for free and offloads maintenance, at the cost of one extra process; ~1h investigation decides |
+| Picnic integration | **MRVDH `picnic-api` v4 directly** (no sidecar) | Step 2a investigation found `setDeliverySlot` is already exposed by MRVDH v4 — `mcp-picnic` wraps the same library, so the sidecar added complexity without unique capability. See `docs/decision-step2.md`. |
 | Runtime language | TypeScript (Node.js) | Forced by wrapper choice; Anthropic TS SDK is solid |
 | LLM | Claude Sonnet (current) via **Anthropic API** (separate from Claude Pro), prompt caching on, single-model for v1 | Best Dutch + tool reliability; API is mandatory because Pro has no programmatic interface |
 | Persistence | SQLite (single file) | Zero-ops, easy to back up |
@@ -18,7 +18,7 @@
 | Hosting | Hetzner CX22, EU region (~€5/mo) | EU-hosted, reputable, predictable |
 | User interface | Telegram bot in a group chat (Jeroen + partner + bot) | Free, identity-aware, cross-platform |
 | Language & tone | Dutch only, informal "je"-form, plain, no filler/emojis, asks when uncertain | Household chat, project preference for plain language |
-| Cart automation | **Level B baseline; Level C (slot reservation) included IF mcp-picnic is adopted** in Step 2 | mcp-picnic exposes slot booking out-of-the-box; with MRVDH-direct, Level C stays deferred |
+| Cart automation | **Level B + Level C**: bot builds cart in Picnic AND reserves a delivery slot at commit time. User pays/confirms in Picnic app. | `setDeliverySlot` is available in MRVDH v4, so Level C costs nothing extra |
 | Commit mode | **Hybrid (b′)**: weekly draft → atomic commit on approval; ad-hoc "voeg X toe" → live commit | Atomic safety for big decisions; no friction for single adds |
 | Context strategy | **Layered**: profile + rolling purchase summary + last ~8 orders in system prompt; `search_order_history` tool for deeper digs | Small cacheable prompt; deeper history on demand |
 | Bootstrap | **Backfill 6 months** of Picnic history on first login + interactive Dutch onboarding for `profile.md` | Useful from day 1, not week 4 |
@@ -56,30 +56,24 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 ### Step 2 — Picnic adapter layer ⚠️ PRIVACY (credentials)
 
-**Step 2a — Integration choice (investigation, ~1 hour, before any code)**
-🟥 Check what `ivo-toby/mcp-picnic` uses under the hood (does it wrap MRVDH, or its own implementation?)
-🟥 Verify slot-booking tool actually works end-to-end (read source, look at recent issues)
-🟥 Spin up `mcp-picnic` locally + Anthropic TS SDK MCP client; confirm a single tool call (e.g. `picnic_search_products`) round-trips cleanly
-🟥 Decide: **mcp-picnic sidecar** (Level C included) OR **MRVDH direct** (Level B only). Record decision + rationale in `docs/decision-step2.md`. Update this plan's critical decisions table.
+**Step 2a — Integration investigation (done)**
+🟩 Checked `ivo-toby/mcp-picnic`: wraps MRVDH `picnic-api@^4.0.0`; doesn't avoid that dependency
+🟩 Verified MRVDH v4 exposes `setDeliverySlot(slotId)` as a public method on `CartService` (confirmed via source read of `src/domains/cart/service.ts`)
+🟩 Decision recorded in `docs/decision-step2.md`: **MRVDH direct, no sidecar; Level C included in v1**
+🟩 Plan's Critical Decisions table updated
 
-**Step 2b — IF mcp-picnic sidecar adopted**
-🟥 Add `mcp-picnic` as a separate `systemd` service alongside the bot
-🟥 Add Anthropic SDK MCP client config to the bot
-🟥 Implement 2FA flow by calling `picnic_generate_2fa_code` + `picnic_verify_2fa_code` from the Telegram layer
-🟥 Session lives in `~/.picnic-session.json` (configurable); secure with `0600` perms
-🟥 Add slot-reservation tool to the agent's tool list (Level C now in v1)
-🟥 Manual smoke test: log in with 2FA, search product, add to cart, reserve slot
+**Step 2b — PicnicClient implementation**
+🟥 Add `picnic-api@^4.0.0` dependency, pin exact version
+🟥 Write `src/picnic/client.ts` — thin `PicnicClient` wrapping only the methods we use: `login` (incl. 2FA), `getOrderHistory`, `searchProducts`, `getRecipes`, `getFavoriteRecipes`, `addToCart`, `removeFromCart`, `getCart`, `getDeliverySlots`, **`setDeliverySlot`** (Level C)
+🟥 Honour `DRY_RUN`: when set, all write methods (`addToCart`, `removeFromCart`, `setDeliverySlot`) log what they *would* do and return synthetic success; reads always go through
+🟥 Implement 2FA login flow: detect `second_factor_authentication_required`, request SMS via `auth.generate2FACode("SMS")`, accept code from caller, verify via `auth.verify2FA(code)`
+🟥 Persist long-lived token to `DATA_DIR/picnic-session.json` after first 2FA. File perms `0600`.
+🟥 Detect expired-token responses and emit an `AuthRequiredError` the Telegram layer can react to
+🟥 No credentials in logs, ever. A logging helper redacts known-sensitive fields.
+🟥 Manual smoke test: log in (with 2FA from Jeroen's phone), fetch last order, smoke `searchProducts`, verify session file is `0600` and credentials absent from logs
 
-**Step 2c — IF MRVDH direct adopted**
-🟥 Add MRVDH `picnic-api`, pin version
-🟥 Write thin `PicnicClient` wrapping only the methods we use: `login` (incl. 2FA), `getOrderHistory`, `searchProducts`, `getRecipes`, `getFavoriteRecipes`, `addToCart`, `removeFromCart`, `getCart`, `getDeliverySlots` (view-only)
-🟥 Implement 2FA login flow: detect `second_factor_authentication_required`, request SMS via `auth.generate2FACode("SMS")`, verify via `auth.verify2FA(code)`
-🟥 Persist long-lived token after first 2FA. File perms `0600`.
-🟥 Detect expired-token responses and emit "auth required" signal
-🟥 Manual smoke test: log in, fetch last order, log out — verify no credentials in logs
-
-**Step 2d — common to both paths**
-🟥 The bot's downstream code (memory, agent, Telegram) treats Picnic via a single internal interface — switching paths later requires changing only this layer
+**Step 2c — interface boundary**
+🟥 Downstream code (memory, agent, Telegram) talks to Picnic only via `PicnicClient` — no direct `picnic-api` imports elsewhere. Keeps future migrations (e.g. to a different wrapper) confined to one file.
 
 ### Step 3 — Memory store
 🟥 Define SQLite schema: `orders`, `order_items`, `products_seen`, `suggestion_log` (kept for v2 diff observation), `chat_turns` (lightweight), `draft_cart` (current in-progress draft per conversation), `api_spend_daily` (for kill-switch)
@@ -163,8 +157,8 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 **Why deferred:** data model (`suggestion_log`) is in v1; adding diff is ~1 day later. Waiting lets us tune on real data.
 
-### Slot reservation (Level C)
-**Only deferred if Step 2a chooses the MRVDH-direct path.** If `mcp-picnic` is adopted, Level C ships in v1. With MRVDH-direct: skip unless Level B genuinely annoys, since adding slot booking requires reverse-engineering Picnic's endpoint.
+### ~~Slot reservation (Level C)~~ — moved to v1
+Step 2a investigation found `setDeliverySlot` is exposed by MRVDH v4. Now part of v1 scope. See `docs/decision-step2.md`.
 
 ### Cheap-call routing to Haiku
 After 1–2 months of usage, identify which calls are trivial enough for Haiku.
@@ -189,7 +183,7 @@ Healthchecks.io or Uptime Kuma. Skipped because in-band self-reporting covers mo
 ## Out of Scope (v1)
 
 - ❌ Full auto-checkout (Level D)
-- ❌ Level C slot reservation (v2)
+- ~~Level C slot reservation~~ → in v1 (free with MRVDH v4)
 - ❌ Active diff observation (v2 — weekly recap stays in v1)
 - ❌ Smart proactive nudges beyond the single weekly cron
 - ❌ Model fine-tuning / RAG / vector search
