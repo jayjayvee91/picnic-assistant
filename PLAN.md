@@ -76,13 +76,15 @@ Baseline VPS hardening (Step 9) applies to all three.
 **Step 2c — interface boundary** 🟩
 🟩 Downstream code talks to Picnic only via `src/picnic/index.ts`; `picnic-api` is not imported anywhere outside `src/picnic/client.ts`. Verified by file inspection.
 
-### Step 3 — Memory store
-🟥 Define SQLite schema: `orders`, `order_items`, `products_seen`, `suggestion_log` (kept for v2 diff observation), `chat_turns` (lightweight), `draft_cart` (current in-progress draft per conversation), `api_spend_daily` (for kill-switch)
-🟥 Write migration script (idempotent)
-🟥 Repository functions: `recordOrder`, `getRecentOrders(N)`, `searchOrderHistory(product)`, `logSuggestion`, `getLatestSuggestion`, `upsertDraftCart`, `clearDraftCart`, `recordApiSpend`, `getTodayApiSpend`
-🟥 **Bootstrap job**: on first successful Picnic login, pull last 6 months of order history and populate `orders`/`order_items`. Gated by a `bootstrap_completed` flag.
-🟥 Pre-computed **purchase summary** job: after every recorded order (incl. backfill), recompute typical-basket stats (top products + avg interval) → small JSON cached for system prompt
-🟥 Daily backup: timestamped copy of `data.db` (local only)
+### Step 3 — Memory store 🟨
+🟩 SQLite via `better-sqlite3@12.10.0` (prebuilt Windows + Linux binaries). Schema in `src/memory/db.ts` is idempotent (`CREATE TABLE IF NOT EXISTS`), uses WAL mode and foreign keys.
+🟩 Tables: `orders`, `order_items`, `products_seen`, `suggestion_log` (kept for v2 diff observation), `chat_turns`, `draft_cart`, `api_spend_daily`, `meta` (small key/value store for flags like `bootstrap_completed`)
+🟩 Repository in `src/memory/repository.ts`: `recordOrder`, `getRecentOrders`, `searchOrderHistory`, `logSuggestion`, `getLatestSuggestion`, `upsertDraftCart`/`getDraftCart`/`clearDraftCart`, `recordApiSpend`/`getTodayApiSpend`, `getMeta`/`setMeta`, `appendChatTurn`. Money as integer cents; timestamps as ISO 8601.
+🟩 Bootstrap in `src/memory/bootstrap.ts`: pulls last 6 months of completed deliveries, calls `getDelivery(id)` per delivery, flattens `OrderLine.items[]` (count-by-repetition) into `(article_id, quantity)` rows. Idempotent (gated by `meta.bootstrap_completed`); polite (default 250ms throttle); resumable on partial failure.
+🟩 Purchase summary in `src/memory/summary.ts`: typical basket (top-N by order count + avg quantity per order), avg interval days between deliveries, last order timestamp. Stored under `meta.purchase_summary_json`. Recomputed at the end of bootstrap; will be recomputed after every new order in Step 8.
+🟩 Daily local backup in `src/memory/backup.ts`: uses `better-sqlite3`'s online `db.backup()` for crash-safe snapshots; default retention 14 files; cron wiring is Step 7's job.
+🟩 Public surface in `src/memory/index.ts`; nothing outside `src/memory/` touches SQL directly.
+🟥 **Manual smoke test (Jeroen)**: `npm run smoke:memory` — should restore the existing Picnic session (no SMS), backfill, print orders/items counts and a top-10 typical basket, write a backup.
 
 ### Step 4 — Household profile ⚠️ PRIVACY (preferences)
 🟥 Define `profile.md` structure: `Preferences` / `Dislikes` / `Brands` / `Patterns` sections, plain Markdown. Seed with starter content collaboratively with Jeroen (incl. brand rules like "pindakaas: altijd Calvé", "default huismerk where possible").
