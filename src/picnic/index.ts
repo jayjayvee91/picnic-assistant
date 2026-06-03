@@ -10,6 +10,7 @@ export { PicnicClient } from './client.js';
 export type {
   Cart,
   Delivery,
+  DeliveryDetail,
   FusionPage,
   GetDeliverySlotsResult,
   PicnicClientOptions,

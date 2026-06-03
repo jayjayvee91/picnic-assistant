@@ -52,6 +52,7 @@ type Inner = InstanceType<typeof PicnicApi>;
  */
 export type Cart = Awaited<ReturnType<Inner['cart']['getCart']>>;
 export type Delivery = Awaited<ReturnType<Inner['delivery']['getDeliveries']>>[number];
+export type DeliveryDetail = Awaited<ReturnType<Inner['delivery']['getDelivery']>>;
 export type SellingUnit = Awaited<ReturnType<Inner['catalog']['search']>>[number];
 export type GetDeliverySlotsResult = Awaited<ReturnType<Inner['cart']['getDeliverySlots']>>;
 export type FusionPage = Awaited<ReturnType<Inner['recipe']['getRecipesPage']>>;
@@ -177,6 +178,16 @@ export class PicnicClient {
     filter: ('CURRENT' | 'COMPLETED' | 'CANCELLED')[] = ['COMPLETED'],
   ): Promise<Delivery[]> {
     return this.callAuthed(() => this.inner.delivery.getDeliveries(filter), 'getDeliveries');
+  }
+
+  /**
+   * Full detail of a single delivery, including all order lines and the
+   * articles inside them. `getDeliveries()` only returns slim summaries —
+   * use this when you need the actual items in an order (e.g. the Step 3
+   * bootstrap that backfills order history).
+   */
+  async getDelivery(deliveryId: string): Promise<DeliveryDetail> {
+    return this.callAuthed(() => this.inner.delivery.getDelivery(deliveryId), 'getDelivery');
   }
 
   /** The current shopping cart (and its computed totals). */
