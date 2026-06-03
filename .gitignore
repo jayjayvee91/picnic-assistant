@@ -1,0 +1,34 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Local data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+data/
+backups/
+
+# Household profile (personal data, lives on the VPS only)
+profile.md
+
+# Node
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
