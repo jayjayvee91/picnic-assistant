@@ -1,0 +1,44 @@
+# systemd unit file for the Picnic Assistant bot.
+#
+# Installed at /etc/systemd/system/picnic-assistant.service by the
+# install-bot.sh script. Run as the SSH user (default `jeroen`); the
+# install script substitutes the username when copying this file into place.
+#
+# Why this shape:
+#   - Restart=always so a transient crash recovers without intervention.
+#   - RestartSec=10 so we don't hot-loop if the bot is consistently failing.
+#   - EnvironmentFile loads the .env from the repo folder. This is the same
+#     file `dotenv` would load if we ran `npm run start:telegram` manually,
+#     so behaviour is identical between systemd and a terminal-driven run.
+#   - WorkingDirectory makes relative paths like ./data behave the same way.
+#   - StandardOutput/Error=journal lets us read logs with `journalctl`.
+#
+# After editing, run: sudo systemctl daemon-reload && sudo systemctl restart picnic-assistant
+
+[Unit]
+Description=Picnic Assistant Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=/home/__USER__/picnic-assistant
+EnvironmentFile=/home/__USER__/picnic-assistant/.env
+ExecStart=/usr/bin/env npx tsx src/telegram/run.ts
+Restart=always
+RestartSec=10
+
+# Stdout/stderr go to systemd's journal — read with `journalctl -u picnic-assistant`
+StandardOutput=journal
+StandardError=journal
+
+# Mild hardening — the bot doesn't need any of these privileges.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/__USER__/picnic-assistant/data
+
+[Install]
+WantedBy=multi-user.target
