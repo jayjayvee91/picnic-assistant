@@ -5,8 +5,9 @@
  *   2. Build the system prompt (static + dynamic blocks).
  *   3. Call Claude with the conversation, tools, and system prompt.
  *   4. If the response contains tool_use blocks, execute each, append a
- *      `tool_result` user message, and loop. Capped at 15 tool calls per
- *      user turn so a buggy model can't burn through a thousand calls.
+ *      `tool_result` user message, and loop. Capped at
+ *      `MAX_TOOL_CALLS_PER_TURN` (see `guards.ts`) so a buggy model can't
+ *      burn through a thousand calls in one turn.
  *   5. When Claude responds with text only, return that text and the
  *      accumulated conversation for the caller to persist.
  *

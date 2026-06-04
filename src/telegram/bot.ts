@@ -17,6 +17,7 @@
  * The whole bot is single-process; per-chat state lives in `state.ts`.
  */
 
+import { randomBytes } from 'node:crypto';
 import { Telegraf, type Context } from 'telegraf';
 import type { Message } from 'telegraf/types';
 
@@ -63,45 +64,87 @@ export interface TelegramBotOptions {
 export function createBot(opts: TelegramBotOptions): Telegraf {
   const bot = new Telegraf(opts.token);
 
-  // /chatid — replies in ANY chat. Useful for one-time wiring. Plain text:
-  // Telegram's Markdown parser treats underscores as italic markers and would
-  // choke on TELEGRAM_ALLOWED_CHAT_ID below — and there's nothing in this
-  // message that genuinely needs formatting.
+  // Bootstrap token: a one-time random secret printed to stdout/journal at
+  // startup IF no chat is configured yet. The user must include it in
+  // `/setchat <token>` to claim the bot — defends against a first-stranger
+  // hijack where any random Telegram user could otherwise grab the bot by
+  // running /setchat before the operator does.
+  //
+  // After a successful claim (or if a chat was already configured via env or
+  // a previous /setchat), the token is cleared and `/setchat` refuses
+  // further claims unless they come from the existing allowed chat.
+  let bootstrapToken: string | null = null;
+  if (getAllowedChatId(opts.db, opts.envAllowedChatId) === null) {
+    bootstrapToken = randomBytes(8).toString('hex');
+    console.log(
+      `\n[telegram] BOOTSTRAP TOKEN: ${bootstrapToken}\n` +
+        `[telegram] No allowed chat configured. To claim the bot, message it from your ` +
+        `target chat and run:  /setchat ${bootstrapToken}\n`,
+    );
+  }
+
+  // /chatid — replies in ANY chat. Just echoes back the caller's own chat id;
+  // not sensitive (every Telegram client already knows its own chat id).
   bot.command('chatid', async (ctx) => {
     await ctx.reply(
       `Chat id: ${ctx.chat.id}\n` +
-        `Zet deze in je .env als TELEGRAM_ALLOWED_CHAT_ID, of stuur /setchat ` +
-        `in de chat die je wil gebruiken om hem direct vast te leggen.`,
+        `Zet deze in je .env als TELEGRAM_ALLOWED_CHAT_ID, of stuur /setchat met ` +
+        `de bootstrap-token uit de serverlogs in de chat die je wil gebruiken.`,
     );
   });
 
-  // /setchat — persists the current chat as the allowed one (so you don't
-  // need to edit .env). Only honoured if no allowed id is configured yet,
-  // OR the message comes FROM the currently-allowed chat (prevents hijack).
+  // /setchat — persists the current chat as the allowed one.
+  //   - First time, no allowed id set: requires the bootstrap token printed to
+  //     stdout at process start. This is what stops a stranger from claiming
+  //     the bot first.
+  //   - Subsequent calls: only honoured if the message comes from the already-
+  //     allowed chat (so a /setchat without args from that chat is a no-op
+  //     reconfirmation, harmless).
   bot.command('setchat', async (ctx) => {
     const current = getAllowedChatId(opts.db, opts.envAllowedChatId);
-    if (current !== null && current !== ctx.chat.id) {
-      await ctx.reply('Deze chat is niet de huidige actieve chat. Negeer.');
+    if (current === null) {
+      // First-time claim path.
+      if (!bootstrapToken) {
+        await ctx.reply(
+          'Er is geen bootstrap-token actief. Herstart de bot om een nieuwe te krijgen.',
+        );
+        return;
+      }
+      const args = ctx.message.text.trim().split(/\s+/).slice(1);
+      const supplied = args[0] ?? '';
+      // Constant-time-ish compare. The token is short, but avoid leaking
+      // length via early-exit on a short prefix match.
+      if (supplied.length !== bootstrapToken.length || supplied !== bootstrapToken) {
+        await ctx.reply(
+          'Ongeldige of ontbrekende bootstrap-token. Gebruik: /setchat <token-uit-serverlogs>.',
+        );
+        return;
+      }
+      setAllowedChatId(opts.db, ctx.chat.id);
+      bootstrapToken = null;
+      await ctx.reply(`Oké, deze chat (id ${ctx.chat.id}) is nu de actieve chat.`);
       return;
     }
-    setAllowedChatId(opts.db, ctx.chat.id);
-    await ctx.reply(`Oké, deze chat (id ${ctx.chat.id}) is nu de actieve chat.`);
+
+    // Reconfiguration path: only honour if message is FROM the current chat.
+    if (current !== ctx.chat.id) {
+      // Silently ignore — we don't want to confirm to a stranger that there's
+      // a bot listening elsewhere.
+      return;
+    }
+    await ctx.reply('Deze chat is al de actieve chat. Geen wijziging.');
   });
 
   // Guard middleware: everything below this is restricted to the allowed chat.
+  // When no chat is configured, we SILENTLY ignore every message except
+  // /chatid and /setchat (which are registered above this middleware). That
+  // way a random stranger who finds the bot's username can't even tell from
+  // the bot's behaviour whether it's unclaimed — they'd need the bootstrap
+  // token from the server logs to claim it.
   bot.use(async (ctx, next) => {
     const allowed = getAllowedChatId(opts.db, opts.envAllowedChatId);
-    if (allowed === null) {
-      await ctx.reply(
-        'Er is nog geen actieve chat ingesteld. Stuur /chatid om je chat-id te zien ' +
-          'en daarna /setchat om deze chat actief te maken.',
-      );
-      return;
-    }
-    if (ctx.chat?.id !== allowed) {
-      // Silently ignore strangers — no reply, so we don't leak that the bot exists.
-      return;
-    }
+    if (allowed === null) return;
+    if (ctx.chat?.id !== allowed) return;
     await next();
   });
 
@@ -160,10 +203,21 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
 
     const chatState = getOrCreateChatState(ctx.chat.id);
 
-    // SMS-code phase wins over normal processing.
-    if (chatState.authFlow === 'awaiting-sms-code' && SMS_CODE_REGEX.test(text)) {
-      const reply = await handleSmsCode(opts.picnic, chatState, text);
-      await sendChunked(ctx, reply);
+    // SMS-code phase wins over normal processing. If we're waiting for the
+    // 6-digit code, treat ANY non-code message as an explicit reminder rather
+    // than falling through to the agent — otherwise the user would get a
+    // confusing "AuthRequiredError" reply, not realising the bot was still
+    // mid-flow.
+    if (chatState.authFlow === 'awaiting-sms-code') {
+      if (SMS_CODE_REGEX.test(text)) {
+        const reply = await handleSmsCode(opts.picnic, chatState, text);
+        await sendChunked(ctx, reply);
+      } else {
+        await ctx.reply(
+          'Ik wacht nog op de 6-cijferige SMS-code voor Picnic. Stuur die, ' +
+            'of /sms voor een nieuwe code.',
+        );
+      }
       return;
     }
 
