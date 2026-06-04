@@ -25,7 +25,11 @@ Type=simple
 User=__USER__
 WorkingDirectory=/home/__USER__/picnic-assistant
 EnvironmentFile=/home/__USER__/picnic-assistant/.env
-ExecStart=/usr/bin/env npx tsx src/telegram/run.ts
+# Invoke tsx directly via the locally-installed binary rather than through `npx`.
+# `npx` wants to write to ~/.npm/_npx/* for its package cache, which is blocked
+# by `ProtectHome=read-only` below. `node_modules/.bin/tsx` is a plain binary
+# read, which works fine even with ProtectHome on.
+ExecStart=/home/__USER__/picnic-assistant/node_modules/.bin/tsx src/telegram/run.ts
 Restart=always
 RestartSec=10
 
