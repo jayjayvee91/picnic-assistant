@@ -62,13 +62,15 @@ export interface TelegramBotOptions {
 export function createBot(opts: TelegramBotOptions): Telegraf {
   const bot = new Telegraf(opts.token);
 
-  // /chatid — replies in ANY chat. Useful for one-time wiring.
+  // /chatid — replies in ANY chat. Useful for one-time wiring. Plain text:
+  // Telegram's Markdown parser treats underscores as italic markers and would
+  // choke on TELEGRAM_ALLOWED_CHAT_ID below — and there's nothing in this
+  // message that genuinely needs formatting.
   bot.command('chatid', async (ctx) => {
     await ctx.reply(
-      `Chat id: \`${ctx.chat.id}\`\n` +
+      `Chat id: ${ctx.chat.id}\n` +
         `Zet deze in je .env als TELEGRAM_ALLOWED_CHAT_ID, of stuur /setchat ` +
         `in de chat die je wil gebruiken om hem direct vast te leggen.`,
-      { parse_mode: 'Markdown' },
     );
   });
 
