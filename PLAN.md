@@ -121,7 +121,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 `npm run start:telegram` (`src/telegram/run.ts`) boots the full runtime; graceful SIGINT/SIGTERM shutdown
 🟩 Manual smoke (Jeroen) passed: `/chatid` + `/setchat` wiring worked, onboarding welcome landed on first message, ad-hoc adds round-tripped (DRY_RUN logs confirmed), `/status` printed correctly. One transient `TimeoutError` on a `ctx.reply` (Telegram API took >90s) — gracefully handled by the error path and the bot recovered. Documented as a known operational reality, not a code defect.
 
-### Step 7 — Scheduler ✅
+### Step 7 — Scheduler ✅ (smoke passed)
 🟩 `croner@10.0.1` instead of `node-cron` — zero deps, built-in TS types, no audit warnings. Same cron pattern API.
 🟩 `src/scheduler/cron.ts`: Thursday 20:00 Europe/Amsterdam (`0 20 * * 4`) → posts the nudge into the configured chat. DST handled by the library.
 🟩 Skips when `/stop` is active (the cron fires but `fireWeeklyNudge` checks `isBotRunning` and no-ops if paused). Skips when no allowed chat id is configured.
