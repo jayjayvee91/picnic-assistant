@@ -96,7 +96,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Runtime smoke check (against a temp file): seeding is idempotent, append-to-existing-section works, append-to-missing-section creates the section, all behaviour matches design
 → **Interactive Dutch onboarding moved to Step 6** — it's a Telegram-driven flow that requires the agent loop + bot to exist. The mechanism (`appendToProfileSection`) ships here; the policy ("ask these 5 questions") lives in Step 6.
 
-### Step 5 — Claude agent core 🟨
+### Step 5 — Claude agent core ✅
 🟩 `@anthropic-ai/sdk@0.100.1` installed; configurable model via `ANTHROPIC_MODEL` env (default `claude-sonnet-4-5-20250929`)
 🟩 `src/agent/prompt.ts`: Dutch system prompt builder. Static block (role, tone, hybrid-mode rules, profile-handling rules, recipe rules, household profile, purchase summary) is cache-eligible; dynamic block (today's date/day in Europe/Amsterdam, current speaker, last 8 orders) is per-turn.
 🟩 `src/agent/tools.ts`: 12 tools defined and wired — `search_picnic_products`, `get_cart`, `get_recent_orders`, `search_order_history`, `fetch_recipe_url`, `add_to_draft`, `remove_from_draft`, `show_draft`, `commit_draft_to_cart`, `add_to_cart_now`, `propose_profile_addition`, `commit_profile_addition`. Profile additions are split propose/commit so the agent must wait for explicit approval before writing.
@@ -107,7 +107,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 No auto-retries on API errors; first failure throws.
 🟩 Prompt caching on: static system block tagged `cache_control: ephemeral`.
 🟩 Public surface via `src/agent/index.ts`; static checks (tsc, eslint, prettier) all clean.
-🟥 **Manual smoke test (Jeroen)**: `npm run smoke:agent` — interactive Dutch REPL. Verify a draft conversation (build → review → commit) and an ad-hoc add work, and that per-turn cost is printed.
+🟩 Manual smoke (Jeroen) passed: 21-item weekly draft (€0.10), commit on approval (€0.12), ad-hoc add (€0.02), profile dedup-recognition (trivial). Total ~€0.27 across 4 turns; well within €2/day cap.
 
 ### Step 6 — Telegram interface
 🟥 Register bot with @BotFather, store token in `.env`
