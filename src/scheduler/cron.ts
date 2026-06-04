@@ -16,7 +16,12 @@
 import { Cron } from 'croner';
 import type { Telegraf } from 'telegraf';
 import type { DB } from '../memory/index.js';
-import { isBotRunning, getAllowedChatId } from '../telegram/index.js';
+// Import directly from the state module (not the package index) to break a
+// circular import: `telegram/index.ts` ← `telegram/bot.ts` ← (here, via
+// `telegram/index.ts`) → `scheduler/index.ts` → `scheduler/cron.ts` → back.
+// Today this happens to work under ESM, but a future innocuous re-export
+// edit would surface as a runtime TypeError at startup.
+import { isBotRunning, getAllowedChatId } from '../telegram/state.js';
 import { buildWeeklyNudge } from './nudge.js';
 
 /** Default fire time: Thursday 20:00 Europe/Amsterdam. */
