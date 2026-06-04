@@ -8,14 +8,18 @@
  * Idempotent and safely resumable:
  *   - The `meta.bootstrap_completed` flag gates re-runs. We never run a
  *     full backfill twice unless the operator explicitly forces it.
+ *   - The flag is set ONLY when at least one order was recorded. A run that
+ *     finds zero deliveries in the lookback window (fresh account, total
+ *     outage) leaves the flag false so the next attempt retries.
  *   - `recordOrder` upserts by `order_id`, so even a forced re-run would
  *     converge to the same state rather than duplicate rows.
  *
  * Polite to Picnic:
  *   - Sequential detail fetches with a small throttle between calls so we
  *     don't burst hundreds of requests in a second.
- *   - On a transient failure mid-walk we stop, leaving partial progress
- *     in the DB; the next run will pick up where we left off.
+ *   - A single failed `getDelivery` is logged and skipped — it doesn't kill
+ *     the walk. Failed deliveries are counted in `deliveriesFailed` so the
+ *     caller can decide whether to re-run.
  */
 
 import type { Delivery, DeliveryDetail, PicnicClient } from '../picnic/index.js';
@@ -41,6 +45,8 @@ export interface BootstrapResult {
   totalDeliveriesConsidered: number;
   ordersRecorded: number;
   itemsRecorded: number;
+  /** Number of deliveries that failed mid-walk and were skipped. */
+  deliveriesFailed: number;
   windowStart: string;
   windowEnd: string;
 }
@@ -62,6 +68,7 @@ export async function runBootstrap(
       totalDeliveriesConsidered: 0,
       ordersRecorded: 0,
       itemsRecorded: 0,
+      deliveriesFailed: 0,
       windowStart: '',
       windowEnd: '',
     };
@@ -78,18 +85,29 @@ export async function runBootstrap(
 
   let ordersRecorded = 0;
   let itemsRecorded = 0;
+  let deliveriesFailed = 0;
 
   for (let i = 0; i < inWindow.length; i++) {
     const delivery = inWindow[i];
     if (!delivery) continue;
 
-    const detail = await picnic.getDelivery(delivery.delivery_id);
-    const flattened = flattenDelivery(detail, delivery);
-    for (const order of flattened) {
-      recordOrder(db, order);
-      ordersRecorded += 1;
-      itemsRecorded += order.items.length;
+    // Per-delivery try/catch keeps a single failed `getDelivery` from
+    // aborting the whole walk. `recordOrder` is idempotent (upsert by
+    // `order_id`), so a future retry safely overwrites this row.
+    try {
+      const detail = await picnic.getDelivery(delivery.delivery_id);
+      const flattened = flattenDelivery(detail, delivery);
+      for (const order of flattened) {
+        recordOrder(db, order);
+        ordersRecorded += 1;
+        itemsRecorded += order.items.length;
+      }
+    } catch (err) {
+      deliveriesFailed += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[bootstrap] skipping delivery ${delivery.delivery_id}: ${msg}`);
     }
+
     opts.onProgress?.(i + 1, inWindow.length);
     if (i < inWindow.length - 1 && throttleMs > 0) {
       await sleep(throttleMs);
@@ -97,13 +115,23 @@ export async function runBootstrap(
   }
 
   recomputeAndStoreSummary(db);
-  setMeta(db, BOOTSTRAP_FLAG, 'true');
+
+  // Only mark bootstrap as complete if we actually recorded something. A
+  // fresh-account run with zero orders in the lookback window leaves the
+  // flag false so the next attempt can backfill once orders exist. If every
+  // delivery failed (network outage mid-walk), we also leave the flag false
+  // so the next run retries — the docstring promises resumability and this
+  // is where we deliver it.
+  if (ordersRecorded > 0) {
+    setMeta(db, BOOTSTRAP_FLAG, 'true');
+  }
 
   return {
     status: 'completed',
     totalDeliveriesConsidered: inWindow.length,
     ordersRecorded,
     itemsRecorded,
+    deliveriesFailed,
     windowStart: windowStart.toISOString(),
     windowEnd: windowEnd.toISOString(),
   };

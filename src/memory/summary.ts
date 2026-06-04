@@ -84,12 +84,21 @@ function computeSummary(db: DB, topN: number): PurchaseSummary {
     ordersAgg.last_order_at,
   );
 
+  // The correlated subquery selects `unit_quantity` from the most recent order
+  // for each article rather than the lexically-greatest unit string. With
+  // `LIMIT topN` on the outer query it runs only topN times — cheap and
+  // honest about pack-size changes over time (e.g. 500g → 600g).
   const typical = db
     .prepare(
       `SELECT
          i.article_id,
          i.article_name,
-         MAX(i.unit_quantity)                    AS unit_quantity,
+         (SELECT i2.unit_quantity
+            FROM order_items i2
+            JOIN orders o2 ON o2.order_id = i2.order_id
+            WHERE i2.article_id = i.article_id
+            ORDER BY o2.creation_time DESC
+            LIMIT 1)                              AS unit_quantity,
          COUNT(DISTINCT i.order_id)              AS times_ordered,
          CAST(SUM(i.quantity) AS REAL) /
            COUNT(DISTINCT i.order_id)            AS avg_quantity_per_order,
