@@ -15,7 +15,7 @@
 | LLM | Claude Sonnet (current) via **Anthropic API** (separate from Claude Pro), prompt caching on, single-model for v1 | Best Dutch + tool reliability; API is mandatory because Pro has no programmatic interface |
 | Persistence | SQLite (single file) | Zero-ops, easy to back up |
 | Household profile | Plain editable Markdown file alongside SQLite | Human-readable; user can SSH-edit |
-| Hosting | Hetzner CX22, EU region (~€5/mo) | EU-hosted, reputable, predictable |
+| Hosting | Hetzner CX23 (or CAX11 ARM), EU region (~€5/mo) | EU-hosted, reputable, predictable. CX22 was the previous name; Hetzner renamed the line. |
 | User interface | Telegram bot in a group chat (Jeroen + partner + bot) | Free, identity-aware, cross-platform |
 | Language & tone | Dutch only, informal "je"-form, plain, no filler/emojis, asks when uncertain | Household chat, project preference for plain language |
 | Cart automation | **Level B + Level C**: bot builds cart in Picnic AND reserves a delivery slot at commit time. User pays/confirms in Picnic app. | `setDeliverySlot` is available in MRVDH v4, so Level C costs nothing extra |

@@ -4,18 +4,26 @@ How to operate the bot in production. Written for **future-Jeroen**, who may hav
 
 ## Quick reference
 
-| Thing you want to do | Command |
-|---|---|
-| **Read live logs** | `journalctl -u picnic-assistant -f` |
-| **Restart the bot** | `sudo systemctl restart picnic-assistant` |
-| **Stop the bot (server-side)** | `sudo systemctl stop picnic-assistant` |
-| **Start the bot (server-side)** | `sudo systemctl start picnic-assistant` |
-| **Check whether it's running** | `sudo systemctl status picnic-assistant` |
-| **Pause the bot from your phone** | Send `/stop` in Telegram |
-| **Resume the bot from your phone** | Send `/start` in Telegram |
-| **Check today's API spend** | Send `/status` in Telegram |
-| **Deploy a code update** | `bash ~/picnic-assistant/deploy/update.sh` |
-| **Make a manual DB backup** | `cp data/data.db data/backups/data-manual-$(date +%F).db` |
+**Where to run these:** The three "Telegram" rows are typed into the Telegram chat on your phone. **Every other row is a Linux command typed on the VPS shell over SSH** — NOT in PowerShell on your laptop. To get to the VPS shell from PowerShell:
+
+```
+ssh jeroen@<your-server-ip>
+```
+
+…then run the command. Commands that touch project files assume you're in `~/picnic-assistant`; if you're not, run `cd ~/picnic-assistant` first.
+
+| Thing you want to do | Where | Command |
+|---|---|---|
+| **Read live logs** | VPS (SSH) | `journalctl -u picnic-assistant -f` |
+| **Restart the bot** | VPS (SSH) | `sudo systemctl restart picnic-assistant` |
+| **Stop the bot (server-side)** | VPS (SSH) | `sudo systemctl stop picnic-assistant` |
+| **Start the bot (server-side)** | VPS (SSH) | `sudo systemctl start picnic-assistant` |
+| **Check whether it's running** | VPS (SSH) | `sudo systemctl status picnic-assistant` |
+| **Pause the bot from your phone** | Telegram (phone) | Send `/stop` |
+| **Resume the bot from your phone** | Telegram (phone) | Send `/start` |
+| **Check today's API spend** | Telegram (phone) | Send `/status` |
+| **Deploy a code update** | VPS (SSH) | `bash ~/picnic-assistant/deploy/update.sh` |
+| **Make a manual DB backup** | VPS (SSH, in `~/picnic-assistant`) | `cp data/data.db data/backups/data-manual-$(date +%F).db` |
 
 ---
 
@@ -30,7 +38,7 @@ You only do this once. After that, you use `update.sh`.
 3. **Add Server**:
    - **Location**: Falkenstein (Germany) or Helsinki (Finland) — pick whichever feels closer.
    - **Image**: Ubuntu 24.04.
-   - **Type**: CX22 (~€5/month, 2 vCPU, 4GB RAM, 40GB disk — more than enough).
+   - **Type**: **CX23** (2 vCPU, 4 GB RAM, 40 GB disk, x86 — ~€5/month). The older "CX22" name in earlier drafts of this doc was renamed by Hetzner. If you'd rather use ARM (slightly cheaper), pick **CAX11** instead — same specs, Ampere CPU. Either works; we tested on x86 so CX23 is the safer pick.
    - **SSH key**: paste your public key here (see "Generating an SSH key" below if you don't have one).
    - **Name**: `picnic-bot`.
 4. Wait ~30 seconds for it to spin up. Note the IPv4 address.
@@ -249,7 +257,7 @@ rm ~/picnic-assistant/data/backups/data-2026-XX-XX*.db   # older ones
 ## Costs
 
 Expected monthly:
-- Hetzner CX22: ~€5
+- Hetzner CX23 (or CAX11): ~€5
 - Anthropic API: ~€2–8 depending on usage
 
 Hetzner bill is fixed and visible at console.hetzner.cloud. Anthropic bill is at console.anthropic.com → Usage. Set a billing alert at Anthropic if you want belt-and-braces on top of the in-bot daily cap.
