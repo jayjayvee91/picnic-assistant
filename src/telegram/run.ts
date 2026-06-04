@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { PicnicClient, type PicnicCountryCode } from '../picnic/index.js';
 import { openDatabase, ensureProfileSeeded, type DB } from '../memory/index.js';
 import { AgentAnthropicClient, AgentLoop, type AgentContext } from '../agent/index.js';
+import { startWeeklyNudge } from '../scheduler/index.js';
 import { createBot } from './bot.js';
 
 function requireEnv(name: string): string {
@@ -88,9 +89,18 @@ async function main(): Promise<void> {
     envAllowedChatId: envChatId,
   });
 
+  // Start the weekly Thursday-20:00 cron in the same process so we don't
+  // need a separate service. The job no-ops when the bot is /stopped.
+  const nudgeJob = startWeeklyNudge({
+    bot,
+    db,
+    envAllowedChatId: envChatId,
+  });
+
   // Graceful shutdown so Telegram releases the long-poll on exit.
   const stop = (signal: string): void => {
     console.log(`[telegram] received ${signal}, stopping bot…`);
+    nudgeJob.stop();
     bot.stop(signal);
     db.close();
     process.exit(0);

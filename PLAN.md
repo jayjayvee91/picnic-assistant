@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 60% (6/10 steps complete)
+**Overall Progress:** 80% (8/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -121,15 +121,18 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 `npm run start:telegram` (`src/telegram/run.ts`) boots the full runtime; graceful SIGINT/SIGTERM shutdown
 🟩 Manual smoke (Jeroen) passed: `/chatid` + `/setchat` wiring worked, onboarding welcome landed on first message, ad-hoc adds round-tripped (DRY_RUN logs confirmed), `/status` printed correctly. One transient `TimeoutError` on a `ctx.reply` (Telegram API took >90s) — gracefully handled by the error path and the bot recovered. Documented as a known operational reality, not a code defect.
 
-### Step 7 — Scheduler
-🟥 Add `node-cron` (timezone-aware, handles DST automatically for Europe/Amsterdam)
-🟥 Job: Thursday 20:00 Europe/Amsterdam → post weekly nudge into the group chat (initiates draft mode)
-🟥 Nudge content: short Dutch prompt + brief context from recent orders + recap question (Step 8)
+### Step 7 — Scheduler ✅
+🟩 `croner@10.0.1` instead of `node-cron` — zero deps, built-in TS types, no audit warnings. Same cron pattern API.
+🟩 `src/scheduler/cron.ts`: Thursday 20:00 Europe/Amsterdam (`0 20 * * 4`) → posts the nudge into the configured chat. DST handled by the library.
+🟩 Skips when `/stop` is active (the cron fires but `fireWeeklyNudge` checks `isBotRunning` and no-ops if paused). Skips when no allowed chat id is configured.
+🟩 Logs `nextRun` ISO timestamp at startup so it's obvious in the logs when the next fire is.
+🟩 Wired into `src/telegram/run.ts` — same process as the bot; stopped on SIGINT/SIGTERM.
+🟩 `/nudge_now` operator command added so the cron-firing path can be exercised without waiting for Thursday.
 
-### Step 8 — Weekly recap (lightweight learning)
-🟥 As part of Thursday nudge, append a recap question: *"hoe ging vorige week — moet ik iets onthouden?"*
-🟥 Any reply goes through the existing "propose profile addition" flow
-🟥 Active diff observation is explicitly v2 — see backlog
+### Step 8 — Weekly recap (lightweight learning) ✅
+🟩 Recap question appended to the weekly nudge in `buildWeeklyNudge` ("Hoe ging de bestelling van vorige week? Moet ik iets onthouden voor de volgende keer?")
+🟩 Replies flow through the normal agent loop — the existing `propose_profile_addition` tool covers the "remember this" path agreed in grilling.
+🟩 Active diff observation remains v2 backlog.
 
 ### Step 9 — VPS deployment ⚠️ PRIVACY (everything lives here)
 🟥 Provision Hetzner CX22, EU region (Falkenstein or Helsinki), Ubuntu LTS
