@@ -45,6 +45,7 @@ import {
   handleSmsCommand,
 } from './auth-flow.js';
 import { sendOnboardingWelcome } from './onboarding.js';
+import { buildWeeklyNudge } from '../scheduler/index.js';
 
 /** Telegram's hard limit on message length. We split conservatively below it. */
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
@@ -138,6 +139,14 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
     const chatState = getOrCreateChatState(ctx.chat.id);
     const reply = await handleSmsCommand(opts.picnic, chatState);
     await ctx.reply(reply);
+  });
+
+  // Manually fire the weekly nudge without waiting for Thursday 20:00. The
+  // cron firing path is identical to this one, so testing here is a fair
+  // proxy for "did the scheduler work" too.
+  bot.command('nudge_now', async (ctx) => {
+    const text = buildWeeklyNudge({ db: opts.db });
+    await ctx.reply(text);
   });
 
   // Free-text messages. Anything that isn't a command lands here.
