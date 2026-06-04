@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 30% (3/10 steps complete)
+**Overall Progress:** 40% (4/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -86,12 +86,15 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Public surface in `src/memory/index.ts`; nothing outside `src/memory/` touches SQL directly.
 🟩 Manual smoke test (Jeroen) passed: bootstrap ran, summary computed, backup written, top-10 basket recognisable.
 
-### Step 4 — Household profile ⚠️ PRIVACY (preferences)
-🟥 Define `profile.md` structure: `Preferences` / `Dislikes` / `Brands` / `Patterns` sections, plain Markdown. Seed with starter content collaboratively with Jeroen (incl. brand rules like "pindakaas: altijd Calvé", "default huismerk where possible").
-🟥 **Interactive Dutch onboarding** (runs once, after first Picnic login): bot asks ~5 questions covering dietary basics, hard dislikes, brand preferences, weekday/weekend pattern. Answers written to `profile.md`.
-🟥 Loader: read `profile.md` fresh **on every conversation start**, inject into Claude's system prompt
-🟥 **Atomic write** pattern when bot appends: write to `profile.md.tmp`, then rename. Never partial-write.
-🟥 "Propose an addition" flow: agent suggests profile updates in chat, user approves, agent appends (never silent writes)
+### Step 4 — Household profile ⚠️ PRIVACY (preferences) ✅
+🟩 Profile structure defined (`Preferences` / `Dislikes` / `Brands` / `Patterns`); seed template inlined in `src/memory/profile.ts`; default brand rules included (huismerk-by-default, Calvé for pindakaas)
+🟩 `loadProfile(path)` reads fresh on every call (no caching) — picks up your SSH edits automatically on next conversation
+🟩 `atomicWriteProfile(path, content)` uses `writeFile → rename` pattern; `0600` perms (best-effort on Windows, mandatory on Linux); a crash mid-write leaves the old file intact
+🟩 `appendToProfileSection(path, section, bullet)` is the *mechanism* for "propose addition": agent calls this only after user approves
+🟩 `ensureProfileSeeded(path)` is idempotent: creates the file from the template on first run, no-op if it already exists
+🟩 Public surface added to `src/memory/index.ts` — no downstream code touches the file directly
+🟩 Runtime smoke check (against a temp file): seeding is idempotent, append-to-existing-section works, append-to-missing-section creates the section, all behaviour matches design
+→ **Interactive Dutch onboarding moved to Step 6** — it's a Telegram-driven flow that requires the agent loop + bot to exist. The mechanism (`appendToProfileSection`) ships here; the policy ("ask these 5 questions") lives in Step 6.
 
 ### Step 5 — Claude agent core
 🟥 Add Anthropic TypeScript SDK; configure Sonnet
@@ -113,6 +116,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟥 Wire incoming messages → agent → reply
 🟥 Handle long replies (Telegram size limit) — split or summarise
 🟥 Implement `/sms` re-auth flow: when Picnic adapter signals "auth required," bot posts in group; user `/sms` → bot triggers SMS → user replies with 6-digit code → bot completes 2FA → conversation resumes
+🟥 **Interactive Dutch onboarding** (moved from Step 4): on first run after Picnic login completes, bot asks ~5 questions in Dutch covering dietary basics, hard dislikes, brand preferences, weekday/weekend pattern. Each answer becomes one `appendToProfileSection` call. One-time, gated by a `meta.onboarding_completed` flag.
 🟥 Implement `/stop`, `/start`, `/status` commands. State stored in SQLite, survives reboots.
 🟥 Implement **self-reporting** of system health: when Picnic or Anthropic is unreachable, or repeated tool failures occur, bot posts a short Dutch message into the group
 🟥 Manual smoke test: end-to-end chat, forced re-auth, `/stop` + `/start`, simulated outage
