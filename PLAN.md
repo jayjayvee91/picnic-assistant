@@ -109,17 +109,17 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Public surface via `src/agent/index.ts`; static checks (tsc, eslint, prettier) all clean.
 🟩 Manual smoke (Jeroen) passed: 21-item weekly draft (€0.10), commit on approval (€0.12), ad-hoc add (€0.02), profile dedup-recognition (trivial). Total ~€0.27 across 4 turns; well within €2/day cap.
 
-### Step 6 — Telegram interface
-🟥 Register bot with @BotFather, store token in `.env`
-🟥 Restrict bot to a single allowed group chat ID (reject all others)
-🟥 Pass Telegram `from.first_name` / `user_id` into the agent so it knows who's talking
-🟥 Wire incoming messages → agent → reply
-🟥 Handle long replies (Telegram size limit) — split or summarise
-🟥 Implement `/sms` re-auth flow: when Picnic adapter signals "auth required," bot posts in group; user `/sms` → bot triggers SMS → user replies with 6-digit code → bot completes 2FA → conversation resumes
-🟥 **Interactive Dutch onboarding** (moved from Step 4): on first run after Picnic login completes, bot asks ~5 questions in Dutch covering dietary basics, hard dislikes, brand preferences, weekday/weekend pattern. Each answer becomes one `appendToProfileSection` call. One-time, gated by a `meta.onboarding_completed` flag.
-🟥 Implement `/stop`, `/start`, `/status` commands. State stored in SQLite, survives reboots.
-🟥 Implement **self-reporting** of system health: when Picnic or Anthropic is unreachable, or repeated tool failures occur, bot posts a short Dutch message into the group
-🟥 Manual smoke test: end-to-end chat, forced re-auth, `/stop` + `/start`, simulated outage
+### Step 6 — Telegram interface 🟨
+🟩 `telegraf@4.16.3` installed; bot token via `TELEGRAM_BOT_TOKEN`
+🟩 Allowed-chat restriction via middleware: `meta.telegram_allowed_chat_id` (set by `/setchat`) takes precedence over the env var; strangers ignored silently; unset state prompts the user with `/chatid` then `/setchat`
+🟩 Identity: `ctx.from.first_name` passed into `AgentLoop.runTurn(speakerName)`; agent's system prompt already injects "wie er nu praat"
+🟩 Free-text messages routed to the agent loop; replies chunked when over 4096 chars (paragraph-aware split, hard-wrap fallback)
+🟩 `/sms` re-auth flow: per-chat state machine (`idle` ↔ `awaiting-sms-code`); a 6-digit message during the awaiting phase auto-verifies; bot posts `AUTH_REQUIRED_PROMPT` when the agent throws `AuthRequiredError`
+🟩 Interactive Dutch onboarding (moved from Step 4): single welcome message on first message in the chat, gated by `meta.onboarding_completed`. The agent's `propose_profile_addition` flow drives the actual learning — no 5-step state machine.
+🟩 `/start`, `/stop`, `/status`, `/reset` commands; running flag persisted in SQLite so `/stop` survives a deploy
+🟩 Self-reporting: `DailySpendCapExceededError`, `IterationCapExceededError`, and unknown errors all surface as Dutch chat messages instead of crashing the process
+🟩 `npm run start:telegram` (`src/telegram/run.ts`) boots the full runtime; graceful SIGINT/SIGTERM shutdown
+🟥 **Manual smoke (Jeroen)**: from your phone, send `/chatid` → `/setchat` → exchange messages; verify the welcome lands, an ad-hoc add round-trips, `/status` is correct, `/stop`+`/start` pause and resume.
 
 ### Step 7 — Scheduler
 🟥 Add `node-cron` (timezone-aware, handles DST automatically for Europe/Amsterdam)
