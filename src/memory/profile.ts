@@ -120,11 +120,14 @@ export function insertBulletUnderSection(
     return `${markdown}${trailing}\n${sectionHeader}\n\n- ${bullet}\n`;
   }
 
-  // Find the line that ends the section body: the next `## ` header, or EOF.
+  // Find the line that ends the section body: the next Markdown heading at any
+  // level (`#`, `##`, `###`, …) or EOF. We terminate on any-level heading so
+  // hand-edited files that add a top-level `# Notes` block at the bottom don't
+  // get bullets accidentally injected past it.
   let endLineIndex = lines.length;
   for (let i = headerLineIndex + 1; i < lines.length; i++) {
     const value = lines[i];
-    if (value !== undefined && value.startsWith('## ')) {
+    if (value !== undefined && /^#{1,6} /.test(value)) {
       endLineIndex = i;
       break;
     }

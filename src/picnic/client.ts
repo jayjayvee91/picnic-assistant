@@ -35,7 +35,7 @@
 import PicnicApi from 'picnic-api';
 
 import { AuthRequiredError, PicnicCallError, TwoFactorRequiredError } from './errors.js';
-import { loadSession, saveSession, type PicnicSession } from './session.js';
+import { clearSession, loadSession, saveSession, type PicnicSession } from './session.js';
 
 /**
  * The shape of the underlying client. `picnic-api` only exports the constructor
@@ -161,7 +161,6 @@ export class PicnicClient {
     this.inner.authKey = null;
     this.hasAuth = false;
     // Best-effort delete; if the file is already gone, fine.
-    const { clearSession } = await import('./session.js');
     await clearSession(this.opts.sessionFile);
     safeLog('info', 'Picnic session forgotten.');
   }
@@ -310,11 +309,23 @@ export class PicnicClient {
 /**
  * Heuristic for "the auth key is bad." MRVDH throws plain Errors with the
  * upstream status text — we check for 401-ish signals across a few shapes.
+ *
+ * Match list is deliberately narrow so we don't nuke a still-valid session
+ * on errors that *mention* authentication without actually being an auth
+ * failure (e.g. "auth service temporarily unavailable" should retry, not
+ * trigger re-login).
  */
 function looksLikeAuthFailure(err: unknown): boolean {
   if (err instanceof Error) {
     const msg = err.message.toLowerCase();
-    if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('auth')) {
+    if (
+      msg.includes('401') ||
+      msg.includes('unauthorized') ||
+      msg.includes('unauthorised') ||
+      msg.includes('invalid_token') ||
+      msg.includes('token expired') ||
+      msg.includes('session expired')
+    ) {
       return true;
     }
   }

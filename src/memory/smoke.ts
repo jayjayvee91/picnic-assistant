@@ -89,6 +89,15 @@ async function main(): Promise<void> {
       `Bootstrap complete: ${result.ordersRecorded} orders, ${result.itemsRecorded} items, ` +
         `from ${result.windowStart.slice(0, 10)} to ${result.windowEnd.slice(0, 10)}.`,
     );
+    if (result.deliveriesFailed > 0) {
+      console.warn(
+        `  ${result.deliveriesFailed} delivery detail fetch(es) failed and were skipped — ` +
+          `re-run to backfill them.`,
+      );
+    }
+    if (result.ordersRecorded === 0 && result.totalDeliveriesConsidered === 0) {
+      console.log('  (No completed orders in the lookback window — flag left unset.)');
+    }
   }
 
   // 3. Print the purchase summary (recompute either way so we always see fresh stats).
