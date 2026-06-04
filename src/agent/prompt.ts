@@ -52,6 +52,8 @@ export async function buildSystemPrompt(ctx: SystemPromptContext): Promise<Syste
     '',
     AGENT_TONE,
     '',
+    TOOL_USE_DISCIPLINE,
+    '',
     HYBRID_COMMIT_RULES,
     '',
     PROFILE_USAGE_RULES,
@@ -93,6 +95,18 @@ const AGENT_TONE = `# Tone
 - No emojis.
 - When uncertain about anything — a product choice, a quantity, what the user wants \
 — ask a short clarifying question instead of guessing.`;
+
+const TOOL_USE_DISCIPLINE = `# Tool use — be economical
+- The typical basket and last orders are ALREADY in this system prompt. \
+Use them. Don't search Picnic again for items whose article id you can see \
+in the recent-orders section — the article ids there are the same ids \
+search_picnic_products would return.
+- For a weekly draft of ~15-20 items, aim for ~30-40 tool calls total. \
+A hard cap of 50 stops runaways; you should never need that many.
+- Group your searches: when the user asks "stel de boodschappen voor", do \
+NOT search → propose → search → propose item by item. Build the draft in \
+one pass and present it as a whole list. The user reviews the WHOLE list \
+in chat before you commit.`;
 
 const HYBRID_COMMIT_RULES = `# Hoe je met de boodschappenlijst omgaat (BELANGRIJK)
 
@@ -155,11 +169,13 @@ function summaryBlock(summary: PurchaseSummary | null): string {
   if (summary.lastOrderAt) {
     lines.push(`Meest recente bestelling: ${summary.lastOrderAt.slice(0, 10)}.`);
   }
-  lines.push('Top producten (frequentie × gemiddelde hoeveelheid per bestelling):');
+  lines.push(
+    'Top producten (article id — naam — frequentie × gemiddelde hoeveelheid per bestelling):',
+  );
   for (const item of summary.typicalBasket.slice(0, 20)) {
     const unit = item.unitQuantity ? ` (${item.unitQuantity})` : '';
     lines.push(
-      `- ${item.name}${unit} — ${item.timesOrdered}× besteld, ~${item.avgQuantityPerOrder} per keer`,
+      `- \`${item.articleId}\` — ${item.name}${unit} — ${item.timesOrdered}× besteld, ~${item.avgQuantityPerOrder} per keer`,
     );
   }
   return lines.join('\n');
@@ -171,7 +187,9 @@ function recentOrdersBlock(db: DB): string {
   return orders
     .map((o) => {
       const date = o.creationTime.slice(0, 10);
-      const itemList = o.items.map((it) => `  - ${it.quantity}× ${it.articleName}`).join('\n');
+      const itemList = o.items
+        .map((it) => `  - \`${it.articleId}\` — ${it.quantity}× ${it.articleName}`)
+        .join('\n');
       return `## ${date} (€${(o.totalPriceCents / 100).toFixed(2)})\n${itemList}`;
     })
     .join('\n\n');

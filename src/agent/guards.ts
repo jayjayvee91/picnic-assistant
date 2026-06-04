@@ -12,7 +12,17 @@ import { recordApiSpend, getTodayApiSpend, type DB } from '../memory/index.js';
 // Tool-call iteration cap
 // ──────────────────────────────────────────────────────────────────────
 
-export const MAX_TOOL_CALLS_PER_TURN = 15;
+/**
+ * Per-turn tool-call cap. The point is to catch **runaway loops** (Claude
+ * gets confused and calls the same tool a thousand times) — NOT to bound
+ * legitimate multi-step work. A weekly draft naturally needs ~2 tool calls
+ * per item (search Picnic, then add_to_draft), so 30-40 calls is real,
+ * normal work for a 15-20-item shop.
+ *
+ * 50 is comfortably above legitimate use and well below runaway. The actual
+ * cost ceiling is the daily €2 spend kill-switch, not this cap.
+ */
+export const MAX_TOOL_CALLS_PER_TURN = 50;
 
 export class IterationCapExceededError extends Error {
   constructor() {
