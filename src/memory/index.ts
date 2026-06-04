@@ -32,3 +32,12 @@ export {
 } from './summary.js';
 export { runBootstrap, type BootstrapOptions, type BootstrapResult } from './bootstrap.js';
 export { backupDatabase, type BackupOptions, type BackupResult } from './backup.js';
+export {
+  loadProfile,
+  ensureProfileSeeded,
+  atomicWriteProfile,
+  appendToProfileSection,
+  insertBulletUnderSection,
+  isKnownSection,
+  type ProfileSection,
+} from './profile.js';
