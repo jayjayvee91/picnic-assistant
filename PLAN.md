@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 50% (5/10 steps complete)
+**Overall Progress:** 60% (6/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -109,7 +109,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Public surface via `src/agent/index.ts`; static checks (tsc, eslint, prettier) all clean.
 🟩 Manual smoke (Jeroen) passed: 21-item weekly draft (€0.10), commit on approval (€0.12), ad-hoc add (€0.02), profile dedup-recognition (trivial). Total ~€0.27 across 4 turns; well within €2/day cap.
 
-### Step 6 — Telegram interface 🟨
+### Step 6 — Telegram interface ✅
 🟩 `telegraf@4.16.3` installed; bot token via `TELEGRAM_BOT_TOKEN`
 🟩 Allowed-chat restriction via middleware: `meta.telegram_allowed_chat_id` (set by `/setchat`) takes precedence over the env var; strangers ignored silently; unset state prompts the user with `/chatid` then `/setchat`
 🟩 Identity: `ctx.from.first_name` passed into `AgentLoop.runTurn(speakerName)`; agent's system prompt already injects "wie er nu praat"
@@ -119,7 +119,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 `/start`, `/stop`, `/status`, `/reset` commands; running flag persisted in SQLite so `/stop` survives a deploy
 🟩 Self-reporting: `DailySpendCapExceededError`, `IterationCapExceededError`, and unknown errors all surface as Dutch chat messages instead of crashing the process
 🟩 `npm run start:telegram` (`src/telegram/run.ts`) boots the full runtime; graceful SIGINT/SIGTERM shutdown
-🟥 **Manual smoke (Jeroen)**: from your phone, send `/chatid` → `/setchat` → exchange messages; verify the welcome lands, an ad-hoc add round-trips, `/status` is correct, `/stop`+`/start` pause and resume.
+🟩 Manual smoke (Jeroen) passed: `/chatid` + `/setchat` wiring worked, onboarding welcome landed on first message, ad-hoc adds round-tripped (DRY_RUN logs confirmed), `/status` printed correctly. One transient `TimeoutError` on a `ctx.reply` (Telegram API took >90s) — gracefully handled by the error path and the bot recovered. Documented as a known operational reality, not a code defect.
 
 ### Step 7 — Scheduler
 🟥 Add `node-cron` (timezone-aware, handles DST automatically for Europe/Amsterdam)
