@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 40% (4/10 steps complete)
+**Overall Progress:** 50% (5/10 steps complete)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -96,18 +96,18 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Runtime smoke check (against a temp file): seeding is idempotent, append-to-existing-section works, append-to-missing-section creates the section, all behaviour matches design
 → **Interactive Dutch onboarding moved to Step 6** — it's a Telegram-driven flow that requires the agent loop + bot to exist. The mechanism (`appendToProfileSection`) ships here; the policy ("ask these 5 questions") lives in Step 6.
 
-### Step 5 — Claude agent core
-🟥 Add Anthropic TypeScript SDK; configure Sonnet
-🟥 Design Dutch system prompt: role, tone (informal "je", plain, no filler, asks when uncertain), today's date + day-of-week in Europe/Amsterdam, upcoming delivery date hint, household profile, purchase summary, last ~8 orders, available tools
-🟥 Define tool schemas: `search_picnic_products`, `add_to_draft`, `remove_from_draft`, `show_draft`, `commit_draft_to_cart`, `add_to_cart_now` (ad-hoc live add), `get_cart`, `search_picnic_recipes`, `get_favorite_recipes`, `fetch_recipe_url`, `read_profile`, `propose_profile_addition`, `log_suggestion`, `search_order_history`, `get_recent_orders`
-🟥 Implement **hybrid b′ logic**: weekly-draft conversations use draft tools + commit; ad-hoc adds use `add_to_cart_now`. Prompt instructs the agent to pick mode and ask when ambiguous.
-🟥 Implement **recipe URL flow**: fetch → try schema.org Recipe extraction → fall back to LLM extraction from page text → fall back to "geef me de ingrediënten." **Always** show extracted list before mapping to Picnic products. Same always-show rule for product mapping.
-🟥 Agent loop: receive message → call Claude with tools → execute tool calls → loop until done → return final message
-🟥 **Tool-call iteration guard**: hard cap of 15 tool calls per user turn. On hit: stop, post a soft error in chat, log loudly.
-🟥 **Conversation token guard**: when context exceeds ~30k tokens, summarise older half into a short note, drop raw messages, continue
-🟥 **Daily API spend kill-switch**: track Anthropic spend per UTC day in SQLite. At €2/day, stop calling Claude, post in chat, require manual `/start` to override.
-🟥 No auto-retries on API errors — report once, stop.
-🟥 Prompt caching on for static parts of system prompt (profile + summary + tool defs)
+### Step 5 — Claude agent core ✅
+🟩 `@anthropic-ai/sdk@0.100.1` installed; configurable model via `ANTHROPIC_MODEL` env (default `claude-sonnet-4-5-20250929`)
+🟩 `src/agent/prompt.ts`: Dutch system prompt builder. Static block (role, tone, hybrid-mode rules, profile-handling rules, recipe rules, household profile, purchase summary) is cache-eligible; dynamic block (today's date/day in Europe/Amsterdam, current speaker, last 8 orders) is per-turn.
+🟩 `src/agent/tools.ts`: 12 tools defined and wired — `search_picnic_products`, `get_cart`, `get_recent_orders`, `search_order_history`, `fetch_recipe_url`, `add_to_draft`, `remove_from_draft`, `show_draft`, `commit_draft_to_cart`, `add_to_cart_now`, `propose_profile_addition`, `commit_profile_addition`. Profile additions are split propose/commit so the agent must wait for explicit approval before writing.
+🟩 Hybrid b′ logic encoded in the system prompt with explicit "ask if unclear" rule.
+🟩 `src/agent/recipes.ts`: JSON-LD Recipe extractor (schema.org). LLM-fallback intentionally deferred to v2; failure returns a "vraag de ingrediënten" note so the always-show rule still works.
+🟩 `src/agent/loop.ts`: agent loop with tool-call execution, conversation-history accumulation, cache-aware system prompt delivery via `AgentAnthropicClient`.
+🟩 `src/agent/guards.ts`: tool-call cap (15/turn), daily spend kill-switch (`assertWithinDailySpendCap` + `recordCallCost` with EUR estimates from Anthropic usage tokens), rough token estimator. Conversation token guard wired into the loop as "drop oldest half when over 30k tokens."
+🟩 No auto-retries on API errors; first failure throws.
+🟩 Prompt caching on: static system block tagged `cache_control: ephemeral`.
+🟩 Public surface via `src/agent/index.ts`; static checks (tsc, eslint, prettier) all clean.
+🟩 Manual smoke (Jeroen) passed: 21-item weekly draft (€0.10), commit on approval (€0.12), ad-hoc add (€0.02), profile dedup-recognition (trivial). Total ~€0.27 across 4 turns; well within €2/day cap.
 
 ### Step 6 — Telegram interface
 🟥 Register bot with @BotFather, store token in `.env`
