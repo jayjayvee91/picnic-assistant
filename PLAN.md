@@ -1,6 +1,6 @@
 # Picnic Assistant — Implementation Plan
 
-**Overall Progress:** 80% (8/10 steps complete; Step 9 artefacts ready for deployment)
+**Overall Progress:** 90% (9/10 steps complete; bot is live on the VPS)
 
 **TLDR:** Build a Dutch-speaking Telegram bot that proposes a weekly Picnic grocery cart for Jeroen + partner based on purchase history, Picnic recipes, and a household profile. Runs 24/7 on a small EU VPS. All-in cost ~€7–13/month on top of any existing Claude Pro subscription (the bot uses the Anthropic API, billed separately from Pro).
 
@@ -134,14 +134,14 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Replies flow through the normal agent loop — the existing `propose_profile_addition` tool covers the "remember this" path agreed in grilling.
 🟩 Active diff observation remains v2 backlog.
 
-### Step 9 — VPS deployment ⚠️ PRIVACY (everything lives here) 🟨
+### Step 9 — VPS deployment ⚠️ PRIVACY (everything lives here) ✅
 🟩 `deploy/setup-vps.sh`: one-time root-on-fresh-VPS script. Creates non-root user with sudo, copies SSH key, disables root SSH + password auth (with both `sshd_config` and `sshd_config.d/*.conf` overrides), UFW firewall (SSH only), Node.js 22 from NodeSource, `unattended-upgrades`. Idempotent.
 🟩 `deploy/install-bot.sh`: as-jeroen script. Git clone (or pull if existing), `npm ci`, seed `.env` from `.env.example` with `0600`, create `data/` with `0700`, install systemd unit with `__USER__` placeholder substitution. Enables but does NOT start the service.
 🟩 `deploy/update.sh`: future-deploy script. Refuses to run with uncommitted changes, ff-only pull from `main`, conditional `npm ci` only if `package-lock.json` changed, `systemctl restart`, tails the last 20 log lines.
 🟩 `deploy/picnic-assistant.service`: systemd unit. `User=__USER__`, `EnvironmentFile=.env`, `Restart=always`, `RestartSec=10`. Mild hardening: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only` with `ReadWritePaths=data/`.
 🟩 `docs/RUNBOOK.md`: full operator manual — first-time deploy (Hetzner provisioning, SSH key gen, setup → install → env → smoke → start), reading logs (`journalctl -u picnic-assistant -f`), routine ops (update, password rotation), kill switches (soft `/stop` → systemd → token revoke), troubleshooting (`AuthRequiredError`, spend cap, disk full, crash-loops), and a file-locations table.
 🟩 Logging: bot writes to stdout/stderr → captured by systemd journal. No file logging in v1 (journal handles rotation). `safeLog` redaction from Step 2 ensures credentials never appear.
-🟥 **Actually deploy**: run `setup-vps.sh` then `install-bot.sh` on a fresh Hetzner VPS, fill `.env`, run `smoke:picnic` once for auth, start the service, wire Telegram chat. Walked through in the next turns.
+🟩 **Actually deployed (2026-06-05)**: Hetzner CX23 (Ubuntu 26.04) in Falkenstein at 167.233.49.214; setup-vps.sh + install-bot.sh ran cleanly; .env SCP'd from laptop with 0600 perms; Picnic 2FA round-tripped on the VPS (234 deliveries fetched, session persisted); memory bootstrap loaded 31 orders / 1051 items / 6-month window into SQLite; bot started under systemd (`Active: active (running)`); bootstrap token consumed via `/setchat`; first `hoi` triggered onboarding welcome; ad-hoc `voeg pasta toe`, `/stop`, `/start`, `/status` all worked end-to-end from phone.
 
 ### Step 10 — First-run validation
 🟥 First-run sequence: fresh deploy → first `/start` triggers Picnic login + 2FA → backfill 6 months of orders → run onboarding → seed `profile.md` → ready
