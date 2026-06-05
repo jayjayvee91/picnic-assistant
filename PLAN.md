@@ -25,7 +25,7 @@
 | Re-auth flow | **Telegram-based**: bot DMs the group when token expires, user replies with `/sms` to trigger SMS, then sends the 6-digit code | Preserves "always reachable from phone" goal |
 | Weekly nudge | Thursday 20:00 Europe/Amsterdam | Per requirements |
 | Identity | Distinguish Jeroen vs partner via Telegram user ID | Per requirements |
-| Price logic | **Price-blind**; brand preferences live in `profile.md` (e.g. "default to huismerk", "pindakaas: altijd Calvé") | User has budget context; Picnic shows prices at review |
+| Price logic | **Price-blind**; brand preferences live in `profile.md` (e.g. "default to huismerk", "for product X always prefer brand Y") | User has budget context; Picnic shows prices at review |
 | Cost runaway guards | 15 tool calls/turn cap; ~30k token conversation cap (older turns summarised); €2/day API spend kill-switch; no auto-retries on API errors | Bounds worst-case bill |
 | Monitoring | **Self-reporting to Telegram**: bot posts in group when Picnic or Anthropic is unreachable, or when repeated failures occur | Same surface as normal use |
 | Kill switches | `/stop`, `/start`, `/status` in Telegram (state in SQLite, survives reboots) + `systemctl stop` as nuclear via SSH | Phone-first; SSH stays available |
@@ -71,7 +71,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Detect expired-token responses and emit `AuthRequiredError` (heuristic on `401`/`unauthorized` in error message, plus `response.status`)
 🟩 `safeLog` helper redacts `password`, `authKey`, `token`, `code`, `otp`, `secret` even if a caller accidentally passes them
 🟩 `src/picnic/index.ts` is the single import surface for downstream code
-🟩 Manual smoke test passed: `npm run smoke:picnic` against Jeroen's real account; 2FA round-tripped via SMS; **234 completed deliveries** returned; session persisted; no credentials in logs. Most recent delivery's top-level keys: `delivery_id, creation_time, slot, eta2, status, delivery_time, orders` (informs Step 3 schema).
+🟩 Manual smoke test passed: `npm run smoke:picnic` against a real Picnic account; 2FA round-tripped via SMS; a multi-year delivery history was returned; session persisted; no credentials in logs. Most recent delivery's top-level keys: `delivery_id, creation_time, slot, eta2, status, delivery_time, orders` (informs Step 3 schema).
 
 **Step 2c — interface boundary** 🟩
 🟩 Downstream code talks to Picnic only via `src/picnic/index.ts`; `picnic-api` is not imported anywhere outside `src/picnic/client.ts`. Verified by file inspection.
@@ -87,7 +87,7 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟩 Manual smoke test (Jeroen) passed: bootstrap ran, summary computed, backup written, top-10 basket recognisable.
 
 ### Step 4 — Household profile ⚠️ PRIVACY (preferences) ✅
-🟩 Profile structure defined (`Preferences` / `Dislikes` / `Brands` / `Patterns`); seed template inlined in `src/memory/profile.ts`; default brand rules included (huismerk-by-default, Calvé for pindakaas)
+🟩 Profile structure defined (`Preferences` / `Dislikes` / `Brands` / `Patterns`); seed template inlined in `src/memory/profile.ts`; default brand rules included (huismerk-by-default with a worked example placeholder)
 🟩 `loadProfile(path)` reads fresh on every call (no caching) — picks up your SSH edits automatically on next conversation
 🟩 `atomicWriteProfile(path, content)` uses `writeFile → rename` pattern; `0600` perms (best-effort on Windows, mandatory on Linux); a crash mid-write leaves the old file intact
 🟩 `appendToProfileSection(path, section, bullet)` is the *mechanism* for "propose addition": agent calls this only after user approves

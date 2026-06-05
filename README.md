@@ -23,6 +23,10 @@ Pre-alpha. Scaffolding only — not functional yet. Track progress in `PLAN.md`.
 # Install dependencies
 npm install
 
+# Activate the pre-commit hook that blocks accidental secret commits.
+# One-time per clone. See .githooks/pre-commit for what it checks.
+npm run setup-hooks
+
 # Copy and fill in environment variables
 cp .env.example .env
 # edit .env

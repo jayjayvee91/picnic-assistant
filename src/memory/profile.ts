@@ -176,7 +176,7 @@ worden bij het volgende bericht meegenomen.
 ## Brands
 
 - Kies bij voorkeur Picnic huismerk waar dat kan.
-- Pindakaas: altijd Calvé.
+- (Hier komen merken die jullie altijd kiezen — bijv. "voor melk altijd merk X". Vul aan via de assistent of handmatig.)
 
 ## Patterns
 
