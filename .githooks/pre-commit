@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Pre-commit hook: refuse commits that would publish secrets or personal data.
+#
+# Activate ONCE per clone with:
+#   git config core.hooksPath .githooks
+# (Or: npm run setup-hooks  — same thing.)
+#
+# Two layers of protection:
+#   1. Path block — refuse to commit `.env`, `*.db`, `profile.md`, etc., even
+#      if someone bypassed `.gitignore` with `git add -f`.
+#   2. Content scan — look for credential-shaped strings in the lines being
+#      ADDED in this commit. Patterns cover Anthropic, GitHub, Telegram,
+#      AWS, generic PEM private keys, and a generic "password": "..." field.
+#
+# To bypass (NOT recommended): git commit --no-verify
+
+set -e
+
+red()   { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
+
+FAILED=0
+
+# ──────────────────────────────────────────────────────────────────────
+# Layer 1: blocked paths
+# ──────────────────────────────────────────────────────────────────────
+
+# Any tracked path matching one of these patterns is refused outright.
+# Add to BLOCKED_PATHS_REGEX if you ever need to extend the list.
+BLOCKED_PATHS_REGEX='^(\.env(\..*)?|.*\.db|.*\.sqlite|.*\.key|.*\.pem|data/.*|profile\.md|.*picnic-session.*\.json)$'
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+for f in $STAGED_FILES; do
+  if printf '%s' "$f" | grep -qE "$BLOCKED_PATHS_REGEX"; then
+    red "✗ Blocked path in staged changes: $f"
+    dim "  This file looks like it holds secrets, personal data, or a local database."
+    dim "  Remove it: git restore --staged \"$f\""
+    FAILED=1
+  fi
+done
+
+# ──────────────────────────────────────────────────────────────────────
+# Layer 2: credential-shaped strings in staged content
+# ──────────────────────────────────────────────────────────────────────
+
+# Each pattern represents a known leaked-secret shape. Be specific to keep
+# false positives low — for example, the Telegram pattern requires the
+# `digits:longstring` shape, not just any colon.
+PATTERNS=(
+  'sk-ant-[a-zA-Z0-9_-]{20,}'                # Anthropic API key
+  'ghp_[a-zA-Z0-9]{36,}'                      # GitHub Personal Access Token
+  'gho_[a-zA-Z0-9]{36,}'                      # GitHub OAuth token
+  'github_pat_[a-zA-Z0-9_]{60,}'              # Fine-grained GitHub PAT
+  '[0-9]{8,12}:[A-Za-z0-9_-]{30,}'            # Telegram bot token
+  'BEGIN ([A-Z]+ )?PRIVATE KEY'               # SSH / PGP / TLS private keys (no leading dashes — confuses grep)
+  'AKIA[0-9A-Z]{16}'                          # AWS access key id
+  '"password"[[:space:]]*:[[:space:]]*"[^"]{6,}"'   # JSON "password": "non-empty"
+)
+
+# Get the list of files to actually scan: everything staged EXCEPT .githooks/*
+# (the hook script naturally contains pattern literals and would self-match).
+FILES_TO_SCAN=$(git diff --cached --name-only --diff-filter=ACM | grep -vE '^\.githooks/' || true)
+
+if [ -n "$FILES_TO_SCAN" ]; then
+  # Build the diff of just those files, with no surrounding context.
+  DIFF=$(printf '%s\n' $FILES_TO_SCAN | xargs git diff --cached -U0 --diff-filter=ACM -- 2>/dev/null || true)
+
+  for pattern in "${PATTERNS[@]}"; do
+    # `-- "$pattern"` tells grep "stop interpreting flags" so patterns starting
+    # with `-` work. `^\+[^+]` keeps us to ADDED lines, not file headers.
+    matches=$(printf '%s' "$DIFF" | grep -E '^\+[^+]' | grep -E -- "$pattern" || true)
+    if [ -n "$matches" ]; then
+      red "✗ Credential-shaped string in staged lines (pattern: $pattern)"
+      printf '%s\n' "$matches" | head -3 | while IFS= read -r line; do
+        dim "    ${line:0:100}"
+      done
+      FAILED=1
+    fi
+  done
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Result
+# ──────────────────────────────────────────────────────────────────────
+
+if [ "$FAILED" -ne 0 ]; then
+  printf '\n'
+  red "Commit aborted: the pre-commit hook caught something that looks risky."
+  dim "If you are 100% sure the match is a false positive (e.g. a documented test value),"
+  dim "you can bypass with: git commit --no-verify"
+  dim "But for anything that looks like a real secret: rotate it before committing."
+  exit 1
+fi
+
+green "✓ pre-commit checks passed"

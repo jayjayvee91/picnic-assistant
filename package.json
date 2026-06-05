@@ -18,7 +18,8 @@
     "smoke:picnic": "tsx src/picnic/smoke.ts",
     "smoke:memory": "tsx src/memory/smoke.ts",
     "smoke:agent": "tsx src/agent/smoke.ts",
-    "start:telegram": "tsx src/telegram/run.ts"
+    "start:telegram": "tsx src/telegram/run.ts",
+    "setup-hooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
