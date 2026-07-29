@@ -167,6 +167,13 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 **Why deferred:** data model (`suggestion_log`) is in v1; adding diff is ~1 day later. Waiting lets us tune on real data.
 
+### Allergen guard — layer 3 (LLM interpretation)
+**Goal:** catch gluten in free-text ingredient declarations that the deterministic layers miss (novel phrasings, e.g. "orzo" = wheat pasta, "mout" = barley malt, ambiguous "gemodificeerd zetmeel").
+
+**Mechanism:** an escalate-only Claude call over the residual ingredient text, guided by the same `gluten-rules.md` rulebook, with its reasoning written to the `allergen_decisions` log. The safety invariant is structural: the LLM can only make a product *more* cautious (allow/unverified → block/unverified), never turn a block into an allow.
+
+**Why deferred:** adds a per-product API call (cost) to every gluten check. v1 ships the deterministic engine (layer 0 override + layer 1 Picnic allergen field + layer 2 rulebook), which covers the labelled-allergen and known-term cases without extra spend. Add layer 3 once we see how often the rulebook alone falls short on real product data.
+
 ### ~~Slot reservation (Level C)~~ — moved to v1
 Step 2a investigation found `setDeliverySlot` is exposed by MRVDH v4. Now part of v1 scope. See `docs/decision-step2.md`.
 
