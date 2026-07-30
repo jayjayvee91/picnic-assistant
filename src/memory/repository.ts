@@ -42,7 +42,14 @@ export interface SuggestionLogRecord {
 
 export interface DraftCart {
   conversationKey: string;
-  items: Array<{ articleId: string; articleName: string; quantity: number }>;
+  items: Array<{
+    articleId: string;
+    articleName: string;
+    quantity: number;
+    /** Gluten verdict at add time; absent on drafts written before the guard. */
+    glutenStatus?: 'allowed' | 'unverified';
+    glutenNote?: string;
+  }>;
   updatedAt: string;
 }
 

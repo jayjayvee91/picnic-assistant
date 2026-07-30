@@ -18,7 +18,13 @@
 import 'dotenv/config';
 import { join } from 'node:path';
 import { PicnicClient, type PicnicCountryCode } from '../picnic/index.js';
-import { openDatabase, ensureProfileSeeded, type DB } from '../memory/index.js';
+import {
+  openDatabase,
+  ensureProfileSeeded,
+  ensureProfileSection,
+  type DB,
+} from '../memory/index.js';
+import { AllergenChecker, ensureRulebookSeeded } from '../allergen/index.js';
 import { AgentAnthropicClient, AgentLoop, type AgentContext } from '../agent/index.js';
 import { startWeeklyNudge } from '../scheduler/index.js';
 import { createBot } from './bot.js';
@@ -45,10 +51,22 @@ async function main(): Promise<void> {
   const sessionFile = process.env['PICNIC_SESSION_FILE'] ?? join(dataDir, 'picnic-session.json');
   const dbPath = join(dataDir, 'data.db');
   const profilePath = join(dataDir, 'profile.md');
+  const rulebookPath = process.env['GLUTEN_RULES_FILE'] ?? join(dataDir, 'gluten-rules.md');
   const dryRun = process.env['DRY_RUN'] !== 'false';
 
   const db: DB = openDatabase(dbPath);
   await ensureProfileSeeded(profilePath);
+  // Households that predate the allergen guard have a profile without the
+  // section — add it so the medical constraint is in the prompt from turn one.
+  await ensureProfileSection(
+    profilePath,
+    'Allergies',
+    'Coeliakie in het huishouden: NOOIT producten bestellen die gluten bevatten of ' +
+      'waar sporen van gluten in kunnen zitten.',
+  );
+  if (await ensureRulebookSeeded(rulebookPath)) {
+    console.log(`[allergen] seeded gluten rulebook at ${rulebookPath}`);
+  }
 
   const picnic = new PicnicClient({
     username,
@@ -70,8 +88,11 @@ async function main(): Promise<void> {
     db,
     picnic,
     profilePath,
+    rulebookPath,
+    allergen: new AllergenChecker({ db, picnic, rulebookPath }),
     conversationKey: 'telegram-main',
     proposedProfileAdditions: new Map(),
+    proposedGlutenRules: new Map(),
   };
 
   const agent = new AgentLoop({

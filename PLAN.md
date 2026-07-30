@@ -151,6 +151,32 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟥 Walk through `/sms` re-auth flow at least once
 🟥 Walk through `/stop` + `/start` + `/status` from phone at least once
 
+### Step 11 — Gluten guard (coeliac safety) ✅ SAFETY-CRITICAL
+**Why:** household members were diagnosed with coeliac disease. Nothing containing gluten *or traces* may be ordered. Treated as a cross-cutting guard rather than a recipe feature, because it must protect every route into the cart.
+
+🟩 `PicnicClient.getProductDetails` — the only route to allergen + ingredient data (`searchProducts` returns none). Upstream parser is marked experimental, so the guard fails safe on a throw; `smoke:picnic` probes it so a PDP layout change surfaces loudly.
+🟩 `## Allergies` profile section + `ensureProfileSection` so pre-existing profiles gain it on upgrade. The profile states WHAT to avoid; it is explicitly *not* the enforcement.
+🟩 `src/allergen/rulebook.ts`: `gluten-rules.md`, human-editable, sections `Bevat gluten` (blocks) / `Twijfel` (flags unverified) / `Veilig` (suppresses false matches) / `Voorbeelden` (notes). Word-start matching handles Dutch compounds ("tarwe" → "tarwebloem"); diacritic-insensitive. Ships a usable starter list rather than an empty file.
+🟩 `src/allergen/guard.ts`: pure layered engine — override → Picnic's declared allergens → rulebook vs. ingredient text → conclusion. Three verdicts: `blocked` / `allowed` / `unverified`.
+🟩 **Fail-safe throughout:** failed fetch, broken upstream parser, or empty allergen list ⇒ `unverified`, never `allowed`. An empty allergen list is ambiguous ("no allergens" vs "no data") so it never counts as proof of safety. `AuthRequiredError` propagates instead of degrading into a warning.
+🟩 `allergen_decisions` audit table records every verdict with the raw inputs it saw; `product_allergen_overrides` holds human corrections and deliberate exceptions.
+🟩 Guard wired into `add_to_draft`, `add_to_cart_now`, **and re-run at `commit_draft_to_cart`** so a rule added mid-conversation retroactively protects items already drafted. A blocked item aborts the whole commit rather than pushing part of an approved list.
+🟩 New tools: `check_product_gluten`, `recent_gluten_decisions`, `add_with_gluten_exception`, `propose_gluten_rule` / `commit_gluten_rule`, `set_product_gluten_override`.
+🟩 Deliberate exceptions go through a **separate tool**, not a flag on the normal add path — a confused model cannot stumble into an override while doing ordinary work. `once` scope is consumed on use so a one-off cannot silently become permanent.
+🟩 `/glutenlog` Telegram command surfaces recent decisions + standing overrides.
+🟩 `npm run smoke:allergen`: 47 checks, no network / session / API key needed. Covers each layer, the fail-safe paths, override behaviour, and **wiring integration** (that the tool handlers actually call the guard — a guard that exists but is never invoked being the failure mode that matters most).
+
+**Deliberately not built:** LLM interpretation of free-text ingredients (layer 3) — see v2 backlog.
+
+**Known limitation:** the upstream library flattens Picnic's "Bevat" and "Bevat mogelijk" (traces) into one `allergens` array, discarding the headings. Safety is unaffected — this household blocks on either — but a block reason says "staat op de allergenenlijst" rather than distinguishing contains from traces. Recovering the split means re-parsing the raw Fusion page ourselves.
+
+### Step 12 — Picnic recipes as a menu source 🟥 NOT STARTED
+🟥 `RecipeSource` interface (`listRecipes` / `getRecipeDetails`) + registry, so a personal recipe DB plugs in later without touching tools or prompt
+🟥 `PicnicRecipeSource` + Fusion/PML parser for the saved-recipes (favourites) section and recipe ingredient lists
+🟥 `getRecipeDetailsPage` wrapper; `list_recipes` / `get_recipe_details` tools
+🟥 Recipe → ingredients → `search_picnic_products` (brand prefs win over Picnic's default pick) → gluten guard → draft → approve
+**Blocked on:** a captured authenticated response from the recipes page. The favourites list only exists as a nested PML component tree; a reliable parser needs real data to build against. Until this ships, `RECIPE_RULES` tells the model it has no access to Picnic recipes and must not pretend otherwise.
+
 ---
 
 ## v2 Backlog (designed, not built)

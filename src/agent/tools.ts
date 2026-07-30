@@ -26,10 +26,27 @@ import {
   getRecentOrders,
   searchOrderHistory,
   logSuggestion,
+  getRecentAllergenDecisions,
+  upsertAllergenOverride,
   type DB,
   type ProfileSection,
 } from '../memory/index.js';
-import { addToDraft, removeFromDraft, loadDraft, emptyDraft, type DraftItem } from './draft.js';
+import {
+  appendRule,
+  verdictLabel,
+  GLUTEN,
+  type AllergenChecker,
+  type CheckResult,
+  type RuleSection,
+} from '../allergen/index.js';
+import {
+  addToDraft,
+  removeFromDraft,
+  loadDraft,
+  emptyDraft,
+  unverifiedDraftItems,
+  type DraftItem,
+} from './draft.js';
 import { extractRecipeFromUrl } from './recipes.js';
 
 // ──────────────────────────────────────────────────────────────────────
@@ -40,6 +57,13 @@ export interface AgentContext {
   db: DB;
   picnic: PicnicClient;
   profilePath: string;
+  /** Path to `gluten-rules.md` — the human-editable rulebook. */
+  rulebookPath: string;
+  /**
+   * The gluten guard. Every path that puts an article into the draft or the
+   * cart goes through this; it is not optional and not model-controlled.
+   */
+  allergen: AllergenChecker;
   /** Key used in the `draft_cart` table — one per Telegram chat. */
   conversationKey: string;
   /**
@@ -47,6 +71,12 @@ export interface AgentContext {
    * a short proposal id the agent passes back in `commit_profile_addition`.
    */
   proposedProfileAdditions: Map<string, { section: ProfileSection; bullet: string }>;
+  /**
+   * Gluten-rule additions proposed but not yet committed. Same approve-first
+   * discipline as profile additions — the bot never changes what counts as
+   * gluten without the household saying yes.
+   */
+  proposedGlutenRules: Map<string, { section: RuleSection; term: string; note?: string }>;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -109,6 +139,37 @@ export const AGENT_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'check_product_gluten',
+    description:
+      'Check whether a specific Picnic article contains gluten (or traces). ' +
+      'Returns a verdict — blocked / allowed / unverified — plus the reason and ' +
+      'the raw allergen + ingredient data the verdict was based on. Use this to ' +
+      'answer "zit hier gluten in?" and to vet a product BEFORE proposing it. ' +
+      'Note: adding to the draft or cart runs this check automatically, so you ' +
+      'do not need to call it first just to be safe.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        articleId: { type: 'string', description: 'Picnic article id.' },
+        articleName: { type: 'string', description: 'Name, for the log and the reply.' },
+      },
+      required: ['articleId'],
+    },
+  },
+  {
+    name: 'recent_gluten_decisions',
+    description:
+      'Return the most recent gluten decisions with their reasons and inputs. ' +
+      'Use when the user asks how or why something was judged — e.g. "waarom heb ' +
+      'je die saus geblokkeerd?" or "wat heb je laatst niet kunnen controleren?".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'How many decisions (default 10, max 30).' },
+      },
+    },
+  },
+  {
     name: 'fetch_recipe_url',
     description:
       'Fetch a recipe page and extract its ingredient list (best-effort, ' +
@@ -131,7 +192,9 @@ export const AGENT_TOOLS: Tool[] = [
     description:
       'Add an article to the WEEKLY DRAFT (not Picnic itself). Use during the ' +
       'weekly-cart conversation. Increments quantity if the article is already ' +
-      'in the draft.',
+      'in the draft. Runs the gluten check first — an article that contains ' +
+      'gluten is refused, and one that cannot be verified is added with a flag ' +
+      'you must repeat to the user.',
     input_schema: {
       type: 'object',
       properties: {
@@ -182,14 +245,113 @@ export const AGENT_TOOLS: Tool[] = [
     description:
       'Add an article DIRECTLY to the Picnic cart (skip the draft). Use only ' +
       'for ad-hoc, single-item requests like "voeg pasta toe". For the weekly ' +
-      'shopping list, use add_to_draft.',
+      'shopping list, use add_to_draft. Runs the gluten check first — an ' +
+      'article that contains gluten is refused, not added.',
     input_schema: {
       type: 'object',
       properties: {
         articleId: { type: 'string' },
+        articleName: { type: 'string', description: 'Name, for the reply and the audit log.' },
         quantity: { type: 'number', description: 'How many to add (default 1).' },
       },
       required: ['articleId'],
+    },
+  },
+
+  // ── Deliberate gluten exception ───────────────────────────────────
+  {
+    name: 'add_with_gluten_exception',
+    description:
+      'Add an article the gluten guard BLOCKED, as a deliberate exception. ' +
+      'ONLY call this when the user has explicitly acknowledged the gluten and ' +
+      'still wants the product — e.g. "ja, ik weet dat daar gluten in zit, doe ' +
+      'toch maar". A plain "ja" approving a list is NOT enough; the user must ' +
+      'address the gluten itself. Never call this on your own initiative, and ' +
+      'never to work around a block you disagree with. First offer a ' +
+      'gluten-free alternative; use this only if the user declines it. ' +
+      'Scope "once" adds it this one time; scope "standing" also stops the ' +
+      'guard blocking this same article in future.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        articleId: { type: 'string' },
+        articleName: { type: 'string' },
+        quantity: { type: 'number', description: 'How many (default 1).' },
+        scope: {
+          type: 'string',
+          enum: ['once', 'standing'],
+          description: '"once" = this time only. "standing" = always allow this article.',
+        },
+        target: {
+          type: 'string',
+          enum: ['draft', 'cart'],
+          description: 'Where it goes — the weekly draft, or straight to the Picnic cart.',
+        },
+        acknowledgement: {
+          type: 'string',
+          description:
+            "Short quote or paraphrase of the user's explicit acknowledgement that this " +
+            'product contains gluten. Recorded in the audit log.',
+        },
+      },
+      required: ['articleId', 'articleName', 'scope', 'target', 'acknowledgement'],
+    },
+  },
+
+  // ── Teaching the guard ────────────────────────────────────────────
+  {
+    name: 'propose_gluten_rule',
+    description:
+      'Propose a new term for the gluten rulebook (gluten-rules.md). Use when ' +
+      'the user corrects a verdict — e.g. they checked a product and it DID ' +
+      'contain gluten, or a term was flagged that is actually fine. Does NOT ' +
+      'write. Returns a proposal id; show the proposed rule and only call ' +
+      'commit_gluten_rule after the user approves. Sections: "Bevat gluten" ' +
+      'blocks, "Twijfel" flags as unverified, "Veilig" prevents false matches.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        section: { type: 'string', enum: ['Bevat gluten', 'Twijfel', 'Veilig'] },
+        term: {
+          type: 'string',
+          description: 'The ingredient term, lower case, e.g. "moutextract".',
+        },
+        note: { type: 'string', description: 'Short Dutch rationale, e.g. "komt van gerst".' },
+      },
+      required: ['section', 'term'],
+    },
+  },
+  {
+    name: 'commit_gluten_rule',
+    description:
+      'Append a previously proposed rule to gluten-rules.md. Only after the ' +
+      'user approves. The new rule applies to the very next check.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        proposalId: { type: 'string', description: 'Id from propose_gluten_rule.' },
+      },
+      required: ['proposalId'],
+    },
+  },
+  {
+    name: 'set_product_gluten_override',
+    description:
+      'Force a verdict for ONE specific article, overriding the automatic ' +
+      "check. Use when Picnic's data is wrong for this product but the term " +
+      'rule should not generalise — e.g. the user checked the packet and it ' +
+      'does contain gluten despite Picnic saying nothing ("blocked"), or a ' +
+      'product is confirmed safe and should stop being flagged ("allowed"). ' +
+      'Only call after the user explicitly asks for it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        articleId: { type: 'string' },
+        articleName: { type: 'string' },
+        verdict: { type: 'string', enum: ['blocked', 'allowed'] },
+        reason: { type: 'string', description: 'Why — recorded and shown in the log.' },
+      },
+      required: ['articleId', 'verdict', 'reason'],
     },
   },
 
@@ -263,6 +425,10 @@ async function dispatch(
       return handleSearchOrderHistory(ctx, input);
     case 'fetch_recipe_url':
       return await handleFetchRecipeUrl(input);
+    case 'check_product_gluten':
+      return await handleCheckProductGluten(ctx, input);
+    case 'recent_gluten_decisions':
+      return handleRecentGlutenDecisions(ctx, input);
 
     // Draft tools
     case 'add_to_draft':
@@ -277,6 +443,16 @@ async function dispatch(
     // Live
     case 'add_to_cart_now':
       return await handleAddToCartNow(ctx, input);
+
+    // Deliberate exception + teaching the guard
+    case 'add_with_gluten_exception':
+      return await handleAddWithGlutenException(ctx, input);
+    case 'propose_gluten_rule':
+      return handleProposeGlutenRule(ctx, input);
+    case 'commit_gluten_rule':
+      return await handleCommitGlutenRule(ctx, input);
+    case 'set_product_gluten_override':
+      return handleSetProductGlutenOverride(ctx, input);
 
     // Profile
     case 'propose_profile_addition':
@@ -354,12 +530,30 @@ async function handleFetchRecipeUrl(input: Record<string, unknown>): Promise<unk
   };
 }
 
-function handleAddToDraft(ctx: AgentContext, input: Record<string, unknown>): unknown {
+async function handleAddToDraft(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
   const articleId = requireString(input, 'articleId');
   const articleName = requireString(input, 'articleName');
   const quantity = clampNumber(input['quantity'], 1, 50, 1);
-  const items = addToDraft(ctx.db, ctx.conversationKey, articleId, articleName, quantity);
-  return { ok: true, draft: items };
+
+  // The guard runs BEFORE the item can enter the draft. There is no code path
+  // from this tool to `addToDraft` that skips it.
+  const check = await ctx.allergen.check(articleId, articleName);
+  if (check.verdict === 'blocked') {
+    return blockedResult(check, articleName);
+  }
+
+  const items = addToDraft(ctx.db, ctx.conversationKey, articleId, articleName, quantity, {
+    status: check.verdict,
+    note: check.reason,
+  });
+  return {
+    ok: true,
+    gluten: glutenSummary(check),
+    draft: items,
+  };
 }
 
 function handleRemoveFromDraft(ctx: AgentContext, input: Record<string, unknown>): unknown {
@@ -382,13 +576,53 @@ async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
     return { ok: false, note: 'De concept-lijst is leeg, dus er valt niets vast te leggen.' };
   }
 
+  // Re-verify EVERY item at commit time rather than trusting the verdict
+  // recorded at add time. Three reasons this matters:
+  //   1. The household may have added a rule mid-conversation — it should
+  //      protect the items already sitting in the draft, not just later ones.
+  //   2. An override may have been set since.
+  //   3. Drafts written before the guard existed carry no verdict at all.
+  // Re-checking is cheap: the PDP cache means no extra Picnic calls for
+  // articles already looked at in this run.
+  const blocked: Array<{ item: DraftItem; reason: string }> = [];
+  const rechecked: DraftItem[] = [];
+  for (const item of items) {
+    const check = await ctx.allergen.check(item.articleId, item.articleName);
+    if (check.verdict === 'blocked') {
+      blocked.push({ item, reason: check.reason });
+      continue;
+    }
+    rechecked.push({ ...item, glutenStatus: check.verdict, glutenNote: check.reason });
+  }
+
+  if (blocked.length > 0) {
+    // Refuse the whole commit. A partial push would leave the household
+    // believing the approved list went through when part of it silently did
+    // not — worse than stopping and saying so.
+    return {
+      ok: false,
+      blockedByGlutenGuard: blocked.map((b) => ({
+        articleId: b.item.articleId,
+        name: b.item.articleName,
+        reason: b.reason,
+      })),
+      note:
+        'Er staan producten in de lijst die gluten bevatten. Er is niets naar de mand ' +
+        'gestuurd. Haal ze eruit met remove_from_draft, of vervang ze door een ' +
+        'glutenvrij alternatief. Wil de gebruiker er bewust toch één bij, dan kan dat ' +
+        'alleen via add_with_gluten_exception na een expliciete bevestiging.',
+    };
+  }
+
+  const unverified = unverifiedDraftItems(rechecked);
+
   // Log the suggestion BEFORE writing to Picnic so v2 diff observation has
   // a snapshot even if a Picnic call fails mid-commit.
-  const suggestionId = logSuggestion(ctx.db, { items });
+  const suggestionId = logSuggestion(ctx.db, { items: rechecked });
 
   const applied: DraftItem[] = [];
   const failed: Array<{ item: DraftItem; error: string }> = [];
-  for (const item of items) {
+  for (const item of rechecked) {
     try {
       await ctx.picnic.addProductToCart(item.articleId, item.quantity);
       applied.push(item);
@@ -402,15 +636,41 @@ async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
   if (failed.length === 0) {
     emptyDraft(ctx.db, ctx.conversationKey);
   } else {
-    const remaining = items.filter((i) => !applied.some((a) => a.articleId === i.articleId));
-    // Replace the draft with only the failed items.
+    const remaining = rechecked.filter((i) => !applied.some((a) => a.articleId === i.articleId));
+    // Replace the draft with only the failed items, verdicts intact.
     emptyDraft(ctx.db, ctx.conversationKey);
     for (const r of remaining) {
-      addToDraft(ctx.db, ctx.conversationKey, r.articleId, r.articleName, r.quantity);
+      addToDraft(
+        ctx.db,
+        ctx.conversationKey,
+        r.articleId,
+        r.articleName,
+        r.quantity,
+        r.glutenStatus ? { status: r.glutenStatus, note: r.glutenNote ?? '' } : undefined,
+      );
     }
   }
 
-  return { ok: failed.length === 0, applied, failed, suggestionId };
+  return {
+    ok: failed.length === 0,
+    applied,
+    failed,
+    suggestionId,
+    // Surfaced so the agent repeats the warning in its confirmation message —
+    // the household's last chance to catch an unverified item before delivery.
+    unverified: unverified.map((i) => ({
+      articleId: i.articleId,
+      name: i.articleName,
+      reason: i.glutenNote ?? 'Glutenstatus onbekend.',
+    })),
+    ...(unverified.length > 0
+      ? {
+          unverifiedNote:
+            `LET OP: ${unverified.length} product(en) konden niet op gluten geverifieerd ` +
+            'worden. Noem ze expliciet bij naam in je bevestiging, niet als terzijde.',
+        }
+      : {}),
+  };
 }
 
 async function handleAddToCartNow(
@@ -418,9 +678,195 @@ async function handleAddToCartNow(
   input: Record<string, unknown>,
 ): Promise<unknown> {
   const articleId = requireString(input, 'articleId');
+  const articleName = typeof input['articleName'] === 'string' ? input['articleName'] : null;
   const quantity = clampNumber(input['quantity'], 1, 50, 1);
+
+  // Ad-hoc adds are gated exactly like draft adds. The guard protects every
+  // route into the cart, not just the weekly-shop route.
+  const check = await ctx.allergen.check(articleId, articleName);
+  if (check.verdict === 'blocked') {
+    return blockedResult(check, articleName ?? articleId);
+  }
+
   await ctx.picnic.addProductToCart(articleId, quantity);
-  return { ok: true, articleId, quantity };
+  return { ok: true, articleId, quantity, gluten: glutenSummary(check) };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Gluten: inspection, deliberate exceptions, and teaching the guard
+// ──────────────────────────────────────────────────────────────────────
+
+async function handleCheckProductGluten(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const articleId = requireString(input, 'articleId');
+  const articleName = typeof input['articleName'] === 'string' ? input['articleName'] : null;
+  const check = await ctx.allergen.check(articleId, articleName);
+  return {
+    ...glutenSummary(check),
+    // The raw inputs, so the agent can quote what it actually saw rather than
+    // paraphrasing a verdict it cannot substantiate.
+    declaredAllergens: check.allergens,
+    ingredients: check.ingredientsText,
+  };
+}
+
+function handleRecentGlutenDecisions(ctx: AgentContext, input: Record<string, unknown>): unknown {
+  const limit = clampNumber(input['limit'], 1, 30, 10);
+  return getRecentAllergenDecisions(ctx.db, limit).map((d) => ({
+    at: d.createdAt,
+    articleId: d.articleId,
+    name: d.articleName,
+    verdict: d.verdict,
+    decidedBy: d.decidedBy,
+    reason: d.reason,
+    matchedTerms: d.matchedTerms,
+  }));
+}
+
+/**
+ * The ONLY route by which a gluten-blocked article can reach the cart.
+ *
+ * It is a separate tool rather than a flag on `add_to_draft` deliberately: a
+ * confused model cannot stumble into an override while doing ordinary work,
+ * because the ordinary path has no parameter that permits it. Reaching here
+ * requires the model to have chosen this tool by name, which the system prompt
+ * gates behind an explicit human acknowledgement of the gluten.
+ */
+async function handleAddWithGlutenException(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const articleId = requireString(input, 'articleId');
+  const articleName = requireString(input, 'articleName');
+  const acknowledgement = requireString(input, 'acknowledgement');
+  const scope = requireString(input, 'scope');
+  const target = requireString(input, 'target');
+  const quantity = clampNumber(input['quantity'], 1, 50, 1);
+
+  if (scope !== 'once' && scope !== 'standing') {
+    throw new Error(`Unknown scope: ${scope}. Use "once" or "standing".`);
+  }
+  if (target !== 'draft' && target !== 'cart') {
+    throw new Error(`Unknown target: ${target}. Use "draft" or "cart".`);
+  }
+
+  // Record the exception first. A 'once' override is consumed by the very next
+  // check (see AllergenChecker), so it cannot leak into future orders.
+  upsertAllergenOverride(ctx.db, {
+    articleId,
+    allergen: GLUTEN,
+    verdict: 'allowed',
+    scope,
+    articleName,
+    reason: `Bewuste uitzondering door de gebruiker: ${acknowledgement}`,
+  });
+
+  // Re-run the check so the exception is exercised through the same path as
+  // everything else, and lands in the audit trail as an explicit exception
+  // rather than as a silent allow.
+  const check = await ctx.allergen.check(articleId, articleName);
+  if (check.verdict === 'blocked') {
+    // Should not happen — the override forces 'allowed'. Fail closed if it does.
+    return blockedResult(check, articleName);
+  }
+
+  if (target === 'cart') {
+    await ctx.picnic.addProductToCart(articleId, quantity);
+  } else {
+    addToDraft(ctx.db, ctx.conversationKey, articleId, articleName, quantity, {
+      status: 'unverified',
+      note: `Bevat gluten — bewust toegevoegd. ${acknowledgement}`,
+    });
+  }
+
+  return {
+    ok: true,
+    articleId,
+    articleName,
+    quantity,
+    target,
+    scope,
+    note:
+      scope === 'standing'
+        ? `"${articleName}" wordt vanaf nu niet meer geblokkeerd. Bevestig dit expliciet ` +
+          'in je antwoord, en vermeld dat het product gluten bevat.'
+        : `"${articleName}" is deze ene keer toegevoegd ondanks gluten. Volgende keer ` +
+          'blokkeert de controle het weer. Vermeld dit expliciet in je antwoord.',
+  };
+}
+
+function handleProposeGlutenRule(ctx: AgentContext, input: Record<string, unknown>): unknown {
+  const section = requireString(input, 'section');
+  const term = requireString(input, 'term');
+  const note = typeof input['note'] === 'string' ? input['note'] : undefined;
+  if (section !== 'Bevat gluten' && section !== 'Twijfel' && section !== 'Veilig') {
+    throw new Error(`Unknown rulebook section: ${section}.`);
+  }
+  const proposalId = `glut_${ctx.proposedGlutenRules.size + 1}_${Date.now().toString(36)}`;
+  ctx.proposedGlutenRules.set(proposalId, { section, term, ...(note ? { note } : {}) });
+  return {
+    proposalId,
+    section,
+    term,
+    note: note ?? null,
+    effect:
+      section === 'Bevat gluten'
+        ? 'Producten met deze term worden voortaan geblokkeerd.'
+        : section === 'Twijfel'
+          ? 'Producten met deze term worden voortaan gemarkeerd als niet-geverifieerd.'
+          : 'Deze term voorkomt dat een bredere regel onterecht aanslaat.',
+  };
+}
+
+async function handleCommitGlutenRule(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const proposalId = requireString(input, 'proposalId');
+  const proposal = ctx.proposedGlutenRules.get(proposalId);
+  if (!proposal) {
+    throw new Error(`Unknown proposalId: ${proposalId}. Did the user approve a different one?`);
+  }
+  await appendRule(ctx.rulebookPath, proposal.section, proposal.term, proposal.note);
+  ctx.proposedGlutenRules.delete(proposalId);
+  return {
+    ok: true,
+    section: proposal.section,
+    term: proposal.term,
+    note: 'De regel geldt direct bij de volgende controle.',
+  };
+}
+
+function handleSetProductGlutenOverride(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): unknown {
+  const articleId = requireString(input, 'articleId');
+  const verdict = requireString(input, 'verdict');
+  const reason = requireString(input, 'reason');
+  const articleName = typeof input['articleName'] === 'string' ? input['articleName'] : null;
+  if (verdict !== 'blocked' && verdict !== 'allowed') {
+    throw new Error(`Unknown verdict: ${verdict}. Use "blocked" or "allowed".`);
+  }
+  upsertAllergenOverride(ctx.db, {
+    articleId,
+    allergen: GLUTEN,
+    verdict,
+    scope: 'standing',
+    articleName,
+    reason,
+  });
+  return {
+    ok: true,
+    articleId,
+    verdict,
+    note:
+      verdict === 'blocked'
+        ? 'Dit product wordt vanaf nu altijd geblokkeerd, ongeacht wat Picnic zegt.'
+        : 'Dit product wordt vanaf nu altijd toegestaan. Controleer dat dit klopt.',
+  };
 }
 
 function handleProposeProfileAddition(ctx: AgentContext, input: Record<string, unknown>): unknown {
@@ -451,6 +897,50 @@ async function handleCommitProfileAddition(
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Shape a blocked verdict into a tool result. Deliberately explicit about what
+ * the model may and may not do next, because this is the one place where a
+ * "helpful" workaround would be actively dangerous.
+ */
+function blockedResult(check: CheckResult, displayName: string): unknown {
+  return {
+    ok: false,
+    blockedByGlutenGuard: true,
+    articleId: check.articleId,
+    name: displayName,
+    verdict: check.verdict,
+    reason: check.reason,
+    decidedBy: check.decidedBy,
+    matchedTerms: check.matchedTerms,
+    declaredAllergens: check.allergens,
+    note:
+      `"${displayName}" is niet toegevoegd: ${check.reason} ` +
+      'Zoek een glutenvrij alternatief en stel dat voor. Als de gebruiker dit ' +
+      'product bewust tóch wil, ondanks de gluten, kan dat alleen via ' +
+      'add_with_gluten_exception — en alleen nadat de gebruiker de gluten ' +
+      'expliciet heeft benoemd en bevestigd.',
+  };
+}
+
+/** Compact verdict summary attached to successful adds. */
+function glutenSummary(check: CheckResult): Record<string, unknown> {
+  return {
+    articleId: check.articleId,
+    verdict: check.verdict,
+    label: verdictLabel(check.verdict),
+    reason: check.reason,
+    decidedBy: check.decidedBy,
+    matchedTerms: check.matchedTerms,
+    ...(check.verdict === 'unverified'
+      ? {
+          warnUser:
+            'Dit product kon NIET op gluten geverifieerd worden. Noem dit expliciet ' +
+            'en bij naam in je antwoord — niet als voetnoot.',
+        }
+      : {}),
+  };
+}
 
 function summariseProduct(p: SellingUnit): unknown {
   const obj = p as unknown as {

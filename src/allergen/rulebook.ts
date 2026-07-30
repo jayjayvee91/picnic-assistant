@@ -185,11 +185,13 @@ export function parseRulebook(markdown: string): GlutenRulebook {
 
 /** Drop an inline human comment: everything from ` — `, ` - `, ` – ` or `#`. */
 function stripInlineComment(body: string): string {
-  return body
-    .split(/\s+[—–]\s+|\s+-\s+|#/)[0]
-    ?.trim()
-    .replace(/^["'`]|["'`]$/g, '')
-    .trim() ?? '';
+  return (
+    body
+      .split(/\s+[—–]\s+|\s+-\s+|#/)[0]
+      ?.trim()
+      .replace(/^["'`]|["'`]$/g, '')
+      .trim() ?? ''
+  );
 }
 
 function dedupe(values: string[]): string[] {

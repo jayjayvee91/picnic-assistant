@@ -117,7 +117,9 @@ async function main(): Promise<void> {
       const ingredients = details.infoSections.find((s) => /ingredi/i.test(s.title));
       console.log(`Allergen probe on "${details.name}" (${first.id}):`);
       console.log(`  allergens:   ${JSON.stringify(details.allergens)}`);
-      console.log(`  ingredients: ${ingredients ? `${ingredients.content.slice(0, 120)}…` : '(none)'}`);
+      console.log(
+        `  ingredients: ${ingredients ? `${ingredients.content.slice(0, 120)}…` : '(none)'}`,
+      );
       if (details.allergens.length === 0 && !ingredients) {
         console.warn(
           '  WARNING: neither allergens nor an ingredients section came back. ' +
