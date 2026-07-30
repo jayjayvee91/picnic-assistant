@@ -56,6 +56,7 @@ export type DeliveryDetail = Awaited<ReturnType<Inner['delivery']['getDelivery']
 export type SellingUnit = Awaited<ReturnType<Inner['catalog']['search']>>[number];
 export type GetDeliverySlotsResult = Awaited<ReturnType<Inner['cart']['getDeliverySlots']>>;
 export type FusionPage = Awaited<ReturnType<Inner['recipe']['getRecipesPage']>>;
+export type ProductDetails = Awaited<ReturnType<Inner['catalog']['getProductDetails']>>;
 
 export type PicnicCountryCode = 'NL' | 'DE' | 'FR';
 
@@ -202,6 +203,27 @@ export class PicnicClient {
   /** Available delivery slots. View-only — booking is `setDeliverySlot`. */
   async getDeliverySlots(): Promise<GetDeliverySlotsResult> {
     return this.callAuthed(() => this.inner.cart.getDeliverySlots(), 'getDeliverySlots');
+  }
+
+  /**
+   * Structured product details for a single article — brand, unit, price, and
+   * (critically for the allergen guard) the declared `allergens` list plus the
+   * free-text "Ingrediënten" info section.
+   *
+   * `search_picnic_products` returns NO allergen data whatsoever, so this is
+   * the only route to a gluten verdict. One call per candidate article, hence
+   * the caching in `src/allergen/`.
+   *
+   * ⚠️ MRVDH marks the underlying method experimental: it parses Picnic's
+   * dynamic Fusion/PML page and can break if Picnic restyles the PDP. Callers
+   * MUST treat a throw as "allergen status unknown", never as "safe" — see
+   * `evaluateGluten`, which fails safe on exactly this path.
+   */
+  async getProductDetails(productId: string): Promise<ProductDetails> {
+    return this.callAuthed(
+      () => this.inner.catalog.getProductDetails(productId),
+      'getProductDetails',
+    );
   }
 
   /**

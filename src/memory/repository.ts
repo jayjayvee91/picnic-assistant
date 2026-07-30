@@ -355,3 +355,197 @@ export function appendChatTurn(db: DB, turn: ChatTurnInput): void {
      VALUES (?, ?, ?, ?)`,
   ).run(turn.telegramUserId, turn.telegramUserName, turn.role, turn.content);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Allergen decisions + per-product overrides
+// ──────────────────────────────────────────────────────────────────────
+
+export type AllergenVerdict = 'blocked' | 'allowed' | 'unverified';
+export type OverrideVerdict = 'blocked' | 'allowed';
+export type OverrideScope = 'standing' | 'once';
+
+export interface AllergenDecisionInput {
+  articleId: string;
+  articleName: string | null;
+  /** Which allergen this verdict is about. Only 'gluten' in v1. */
+  allergen: string;
+  verdict: AllergenVerdict;
+  /** 'override' | 'picnic_allergens' | 'rulebook' | 'no_data' | 'exception' */
+  decidedBy: string;
+  reason: string;
+  /** Picnic's declared allergen list as seen at decision time. */
+  allergens: string[] | null;
+  /** The ingredient text the decision was made against (may be long). */
+  ingredientsText: string | null;
+  /** Rulebook terms that matched, if any. */
+  matchedTerms: string[];
+}
+
+export interface AllergenDecisionRecord extends AllergenDecisionInput {
+  id: number;
+  createdAt: string;
+}
+
+/**
+ * Append a decision to the audit trail. Called for EVERY evaluation, including
+ * allows — a log that only records blocks cannot answer "why was this
+ * allowed?", which is half the transparency requirement.
+ */
+export function logAllergenDecision(db: DB, decision: AllergenDecisionInput): number {
+  const result = db
+    .prepare(
+      `INSERT INTO allergen_decisions
+         (article_id, article_name, allergen, verdict, decided_by, reason,
+          allergens_json, ingredients_txt, matched_terms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      decision.articleId,
+      decision.articleName,
+      decision.allergen,
+      decision.verdict,
+      decision.decidedBy,
+      decision.reason,
+      decision.allergens === null ? null : JSON.stringify(decision.allergens),
+      decision.ingredientsText,
+      JSON.stringify(decision.matchedTerms),
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/** Most recent decisions, newest first. Powers `/gluten-log`. */
+export function getRecentAllergenDecisions(db: DB, limit = 20): AllergenDecisionRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT id, created_at, article_id, article_name, allergen, verdict,
+              decided_by, reason, allergens_json, ingredients_txt, matched_terms
+       FROM allergen_decisions ORDER BY id DESC LIMIT ?`,
+    )
+    .all(limit) as Array<{
+    id: number;
+    created_at: string;
+    article_id: string;
+    article_name: string | null;
+    allergen: string;
+    verdict: AllergenVerdict;
+    decided_by: string;
+    reason: string;
+    allergens_json: string | null;
+    ingredients_txt: string | null;
+    matched_terms: string | null;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    createdAt: r.created_at,
+    articleId: r.article_id,
+    articleName: r.article_name,
+    allergen: r.allergen,
+    verdict: r.verdict,
+    decidedBy: r.decided_by,
+    reason: r.reason,
+    allergens: r.allergens_json === null ? null : (JSON.parse(r.allergens_json) as string[]),
+    ingredientsText: r.ingredients_txt,
+    matchedTerms: r.matched_terms === null ? [] : (JSON.parse(r.matched_terms) as string[]),
+  }));
+}
+
+export interface AllergenOverride {
+  articleId: string;
+  allergen: string;
+  verdict: OverrideVerdict;
+  scope: OverrideScope;
+  articleName: string | null;
+  reason: string;
+  createdAt: string;
+}
+
+export function getAllergenOverride(
+  db: DB,
+  articleId: string,
+  allergen = 'gluten',
+): AllergenOverride | null {
+  const row = db
+    .prepare(
+      `SELECT article_id, allergen, verdict, scope, article_name, reason, created_at
+       FROM product_allergen_overrides WHERE article_id = ? AND allergen = ?`,
+    )
+    .get(articleId, allergen) as
+    | {
+        article_id: string;
+        allergen: string;
+        verdict: OverrideVerdict;
+        scope: OverrideScope;
+        article_name: string | null;
+        reason: string;
+        created_at: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    articleId: row.article_id,
+    allergen: row.allergen,
+    verdict: row.verdict,
+    scope: row.scope,
+    articleName: row.article_name,
+    reason: row.reason,
+    createdAt: row.created_at,
+  };
+}
+
+export function upsertAllergenOverride(
+  db: DB,
+  override: Omit<AllergenOverride, 'createdAt'>,
+): void {
+  db.prepare(
+    `INSERT INTO product_allergen_overrides
+       (article_id, allergen, verdict, scope, article_name, reason)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(article_id, allergen) DO UPDATE SET
+       verdict      = excluded.verdict,
+       scope        = excluded.scope,
+       article_name = excluded.article_name,
+       reason       = excluded.reason,
+       created_at   = datetime('now')`,
+  ).run(
+    override.articleId,
+    override.allergen,
+    override.verdict,
+    override.scope,
+    override.articleName,
+    override.reason,
+  );
+}
+
+export function deleteAllergenOverride(db: DB, articleId: string, allergen = 'gluten'): void {
+  db.prepare(`DELETE FROM product_allergen_overrides WHERE article_id = ? AND allergen = ?`).run(
+    articleId,
+    allergen,
+  );
+}
+
+/** All standing + pending one-off overrides, newest first. */
+export function listAllergenOverrides(db: DB, limit = 50): AllergenOverride[] {
+  const rows = db
+    .prepare(
+      `SELECT article_id, allergen, verdict, scope, article_name, reason, created_at
+       FROM product_allergen_overrides ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(limit) as Array<{
+    article_id: string;
+    allergen: string;
+    verdict: OverrideVerdict;
+    scope: OverrideScope;
+    article_name: string | null;
+    reason: string;
+    created_at: string;
+  }>;
+  return rows.map((r) => ({
+    articleId: r.article_id,
+    allergen: r.allergen,
+    verdict: r.verdict,
+    scope: r.scope,
+    articleName: r.article_name,
+    reason: r.reason,
+    createdAt: r.created_at,
+  }));
+}

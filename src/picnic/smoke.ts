@@ -103,6 +103,38 @@ async function main(): Promise<void> {
     throw err;
   }
 
+  // 3. Verify the allergen data path the gluten guard depends on. We search for
+  //    a product very likely to declare gluten (bread) and print what Picnic
+  //    actually returns, so a PDP layout change upstream shows up here loudly
+  //    rather than silently degrading every product to "unverified".
+  try {
+    const hits = await client.searchProducts('brood');
+    const first = hits[0] as { id?: string; name?: string } | undefined;
+    if (!first?.id) {
+      console.warn('No search hits for "brood" — skipping allergen probe.');
+    } else {
+      const details = await client.getProductDetails(first.id);
+      const ingredients = details.infoSections.find((s) => /ingredi/i.test(s.title));
+      console.log(`Allergen probe on "${details.name}" (${first.id}):`);
+      console.log(`  allergens:   ${JSON.stringify(details.allergens)}`);
+      console.log(`  ingredients: ${ingredients ? `${ingredients.content.slice(0, 120)}…` : '(none)'}`);
+      if (details.allergens.length === 0 && !ingredients) {
+        console.warn(
+          '  WARNING: neither allergens nor an ingredients section came back. ' +
+            'The upstream PDP parser may have broken — the gluten guard would ' +
+            'mark everything "unverified" in this state.',
+        );
+      }
+    }
+  } catch (err) {
+    if (err instanceof AuthRequiredError) {
+      console.error('Saved session is expired. Delete the session file and re-run.');
+      process.exit(2);
+    }
+    // Non-fatal: the allergen probe is diagnostic, not a gate on the smoke test.
+    console.warn('Allergen probe failed:', err instanceof Error ? err.message : err);
+  }
+
   console.log('Smoke test OK.');
 }
 

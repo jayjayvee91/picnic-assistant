@@ -64,6 +64,9 @@ function migrate(db: DB): void {
  *   draft_cart      in-progress draft per conversation
  *   api_spend_daily Anthropic spend per UTC day for the kill-switch
  *   meta            tiny key/value for flags like `bootstrap_completed`
+ *   allergen_decisions        audit trail of every gluten verdict (transparency)
+ *   product_allergen_overrides  per-product human corrections + deliberate
+ *                               exceptions, which outrank all automatic layers
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS orders (
@@ -130,5 +133,50 @@ CREATE TABLE IF NOT EXISTS api_spend_daily (
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+-- Every gluten evaluation, whatever the outcome. This is the "show me how it
+-- decided" surface: raw inputs, which layer fired, and the resulting verdict.
+-- Append-only; never rewritten. Retained indefinitely (rows are tiny) so a
+-- past decision can always be re-examined.
+CREATE TABLE IF NOT EXISTS allergen_decisions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  article_id      TEXT NOT NULL,
+  article_name    TEXT,
+  allergen        TEXT NOT NULL DEFAULT 'gluten',
+  verdict         TEXT NOT NULL CHECK (verdict IN ('blocked','allowed','unverified')),
+  -- Which layer produced the verdict: 'override' | 'picnic_allergens'
+  -- | 'rulebook' | 'no_data' | 'exception'
+  decided_by      TEXT NOT NULL,
+  reason          TEXT NOT NULL,
+  -- Raw inputs the decision saw, so a verdict can be audited after the fact
+  -- even if Picnic later changes the product's data.
+  allergens_json  TEXT,
+  ingredients_txt TEXT,
+  matched_terms   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_allergen_decisions_created
+  ON allergen_decisions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_allergen_decisions_article
+  ON allergen_decisions(article_id);
+
+-- Human corrections and deliberate exceptions, keyed by article. Outranks
+-- every automatic layer — this is both "Picnic mislabelled this, always block
+-- it" and "yes, I know this has gluten, I want it anyway".
+--
+-- The verdict column is what the override forces. The scope column
+-- distinguishes a standing rule from a one-off: 'standing' persists, 'once' is
+-- consumed by the next add and then deleted, so a single deliberate exception
+-- cannot silently become permanent.
+CREATE TABLE IF NOT EXISTS product_allergen_overrides (
+  article_id   TEXT NOT NULL,
+  allergen     TEXT NOT NULL DEFAULT 'gluten',
+  verdict      TEXT NOT NULL CHECK (verdict IN ('blocked','allowed')),
+  scope        TEXT NOT NULL DEFAULT 'standing' CHECK (scope IN ('standing','once')),
+  article_name TEXT,
+  reason       TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (article_id, allergen)
 );
 `;
