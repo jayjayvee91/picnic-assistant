@@ -193,6 +193,28 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 **Why deferred:** data model (`suggestion_log`) is in v1; adding diff is ~1 day later. Waiting lets us tune on real data.
 
+### Allergen guard — unverified-noise / warning fatigue
+**The problem:** an empty allergen list from Picnic is ambiguous — it can mean "this product has no allergens" or "we have no data" — and the guard cannot tell the two apart, so it fails safe to `unverified`. Fresh produce and unlabelled staples therefore come back unverified by design. If a weekly draft of ~20 items produces 10+ warnings, the household stops reading them, and a warning nobody reads is worse than no warning: it is the safety-theatre failure mode that actively erodes the guard's value.
+
+**Already mitigated in v1 (may be enough):**
+- Unverified items are grouped at the approval step rather than announced per-add.
+- A standing `allowed` override permanently silences a known-safe staple (`set_product_gluten_override`).
+
+**Options if it still proves noisy in real use:**
+- Auto-suppress whole product categories that are inherently unlabelled (loose fruit/veg), with the suppression itself visible in `/glutenlog`.
+- Treat "ingredient text present and clean, no allergen block" as a weaker `allowed` rather than `unverified` — trades a little caution for far less noise.
+- Track per-article "seen and confirmed by a human N times" and stop re-warning after the first confirmation.
+- Nudge the household to convert repeat offenders into overrides, e.g. a batched "these 5 products keep coming up unverified — confirm once and I'll stop asking".
+
+**Why deferred:** the right fix depends on the actual unverified rate against the household's real basket, which we cannot know until the guard has run over a few live weekly drafts. Tuning now would be guessing. **Revisit after the first 2–3 real orders** — check what fraction of items land `unverified` and whether the grouping alone keeps it tolerable.
+
+### Allergen guard — contains vs. traces precision
+**The problem:** the upstream library flattens Picnic's "Bevat" (contains) and "Bevat mogelijk" (traces) into a single `allergens` array and discards the headings, and the structured type that preserves the split (`Article.allergies`) is not reachable from any service method.
+
+**Impact:** none on safety — this household blocks on either — but a block reason reads "staat op de allergenenlijst" instead of distinguishing "contains gluten" from "may contain traces", which slightly weakens the transparency goal.
+
+**Fix if wanted:** parse the raw Fusion page ourselves (`product-page-allergies` block) keeping the headings, instead of relying on the library's flattened field. ~30 lines, one extra parser to maintain, equally exposed to a Picnic layout change.
+
 ### Allergen guard — layer 3 (LLM interpretation)
 **Goal:** catch gluten in free-text ingredient declarations that the deterministic layers miss (novel phrasings, e.g. "orzo" = wheat pasta, "mout" = barley malt, ambiguous "gemodificeerd zetmeel").
 
