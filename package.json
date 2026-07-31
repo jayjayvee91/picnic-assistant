@@ -19,6 +19,7 @@
     "smoke:memory": "tsx src/memory/smoke.ts",
     "smoke:agent": "tsx src/agent/smoke.ts",
     "smoke:allergen": "tsx src/allergen/smoke.ts",
+    "capture:recipes": "tsx src/picnic/capture-recipes.ts",
     "start:telegram": "tsx src/telegram/run.ts",
     "setup-hooks": "git config core.hooksPath .githooks"
   },

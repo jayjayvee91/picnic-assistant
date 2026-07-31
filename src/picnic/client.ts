@@ -238,6 +238,18 @@ export class PicnicClient {
     return this.callAuthed(() => this.inner.recipe.getRecipesPage(), 'getRecipesPage');
   }
 
+  /**
+   * The detail page for one recipe — ingredients, steps, servings, pricing.
+   * Also a Fusion page, so the same "needs a real sample before we can parse
+   * it" caveat as `getRecipesPage` applies.
+   */
+  async getRecipeDetailsPage(recipeId: string): Promise<FusionPage> {
+    return this.callAuthed(
+      () => this.inner.recipe.getRecipeDetailsPage(recipeId),
+      'getRecipeDetailsPage',
+    );
+  }
+
   // ──────────────────────────────────────────────────────────────────────
   // Writes (DRY_RUN-gated)
   // ──────────────────────────────────────────────────────────────────────
