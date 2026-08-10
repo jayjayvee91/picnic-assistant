@@ -110,10 +110,20 @@ async function main(): Promise<void> {
   for (const hint of unique(savedHints).slice(0, 20)) say(`  - ${hint}`);
   say();
 
-  const ids = collectRecipeIds(page);
-  say(`Candidate recipe ids found: ${ids.length}`);
-  for (const id of ids.slice(0, 15)) say(`  - ${id}`);
+  // Ids are grouped by where they came from. A Fusion page is full of
+  // 24-hex-looking identifiers that are NOT recipes (analytics entity ids,
+  // template variant ids, image ids), so provenance is what separates a real
+  // recipe id from a decoy.
+  const bySource = collectRecipeIds(page);
+  const totalIds = [...bySource.values()].reduce((n, s) => n + s.size, 0);
+  say(`Candidate ids found: ${totalIds}, grouped by where they appeared:`);
+  for (const [source, set] of [...bySource.entries()].sort((a, b) => b[1].size - a[1].size)) {
+    const sample = [...set].slice(0, 5).join(', ');
+    say(`  ${source} (${set.size}): ${sample}${set.size > 5 ? ', …' : ''}`);
+  }
   say();
+
+  const ids = rankedIds(bySource);
 
   // ── 3. Recipe detail pages ──────────────────────────────────────────
   const picked = ids.slice(0, wantDetails);
@@ -124,17 +134,26 @@ async function main(): Promise<void> {
   const manualId = process.argv.find((a) => a.startsWith('--id='))?.split('=')[1];
   if (manualId) picked.unshift(manualId);
 
+  let detailsWritten = 0;
   for (const id of unique(picked)) {
     try {
       const detail = await client.getRecipeDetailsPage(id);
       const detailPath = join(outDir, `recipe-detail-${sanitise(id)}.json`);
       await writeFile(detailPath, JSON.stringify(detail, null, 2), { mode: 0o600 });
       say(`Wrote ${detailPath}`);
+      detailsWritten++;
     } catch (err) {
-      say(
-        `  could not fetch detail for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // Print the UNDERLYING cause, not just our wrapper. The wrapper message
+      // ("Picnic call ... failed") says nothing about whether this was a 404,
+      // a bad id format, or an auth problem.
+      say(`  could not fetch detail for ${id}: ${describeError(err)}`);
     }
+  }
+  if (detailsWritten === 0 && picked.length > 0) {
+    say();
+    say('No detail page could be fetched. The ids above are probably not recipe ids —');
+    say('a Fusion page carries plenty of other 24-hex identifiers. The overview dump');
+    say('still contains everything needed to find the right ones.');
   }
   say();
 
@@ -182,12 +201,31 @@ function collectStrings(value: unknown, out: string[] = [], depth = 0): string[]
 }
 
 /**
- * Walk the tree for things that look like recipe identifiers. We cast a wide
- * net on purpose: any `recipe_id`/`recipeId` field, plus `id` fields on nodes
- * whose sibling `type` mentions a recipe or selling group.
+ * Walk the tree collecting identifier-looking values, TAGGED BY PROVENANCE.
+ *
+ * The first pass of this script collected everything that looked like an id and
+ * fed it straight to the detail endpoint; every call failed, because a Fusion
+ * page is full of 24-hex identifiers that are not recipes (analytics entity
+ * ids, template variant ids, image ids). Keeping the source of each id is what
+ * lets us tell them apart — and lets a failing run still be informative.
  */
-function collectRecipeIds(value: unknown, out: string[] = [], depth = 0): string[] {
+function collectRecipeIds(
+  value: unknown,
+  out: Map<string, Set<string>> = new Map(),
+  depth = 0,
+): Map<string, Set<string>> {
   if (depth > 40) return out;
+
+  const add = (source: string, id: unknown): void => {
+    if (typeof id !== 'string' || id.length === 0) return;
+    let set = out.get(source);
+    if (!set) {
+      set = new Set();
+      out.set(source, set);
+    }
+    set.add(id);
+  };
+
   if (Array.isArray(value)) {
     for (const item of value) collectRecipeIds(item, out, depth + 1);
     return out;
@@ -195,17 +233,74 @@ function collectRecipeIds(value: unknown, out: string[] = [], depth = 0): string
   if (!value || typeof value !== 'object') return out;
 
   const obj = value as Record<string, unknown>;
+
+  // Explicit recipe-ish keys are the strongest signal.
   for (const key of ['recipe_id', 'recipeId', 'selling_group_id', 'sellingGroupId']) {
-    const v = obj[key];
-    if (typeof v === 'string' && v.length > 0) out.push(v);
+    add(`key:${key}`, obj[key]);
   }
-  const type = typeof obj['type'] === 'string' ? (obj['type'] as string) : '';
-  if (/recipe|meal|cookbook|selling_group/i.test(type) && typeof obj['id'] === 'string') {
-    out.push(obj['id'] as string);
+
+  // An `id` on a node whose `type` mentions a recipe. Tag with the type so we
+  // can see which component types actually carry recipe ids.
+  const type = typeof obj['type'] === 'string' ? obj['type'] : '';
+  if (type && typeof obj['id'] === 'string' && /recipe|meal|cookbook|selling/i.test(type)) {
+    add(`type:${type}`, obj['id']);
+  }
+
+  // Analytics payloads often carry the id of the thing being rendered, which is
+  // frequently the real recipe id even when the surrounding node hides it.
+  const analytics = obj['analytics'];
+  if (analytics && typeof analytics === 'object') {
+    const entityIds = (analytics as Record<string, unknown>)['entity_ids'];
+    if (Array.isArray(entityIds)) {
+      for (const e of entityIds) add('analytics:entity_ids', e);
+    }
+  }
+
+  // Deep links are the most reliable source of all: the app's own navigation
+  // targets. A link like ".../recipe-details?recipe_id=X" names X definitively.
+  for (const key of ['link', 'url', 'deeplink', 'target', 'action']) {
+    const v = obj[key];
+    if (typeof v === 'string' && /recipe/i.test(v)) {
+      const m = /recipe[_-]?id=([A-Za-z0-9_-]+)/i.exec(v);
+      if (m?.[1]) add('deeplink', m[1]);
+    }
   }
 
   for (const v of Object.values(obj)) collectRecipeIds(v, out, depth + 1);
-  return unique(out);
+  return out;
+}
+
+/**
+ * Order candidate ids by how likely they are to be real recipe ids: explicit
+ * keys and deep links first, analytics last.
+ */
+function rankedIds(bySource: Map<string, Set<string>>): string[] {
+  const rank = (source: string): number => {
+    if (source.startsWith('key:recipe')) return 0;
+    if (source === 'deeplink') return 1;
+    if (source.startsWith('key:')) return 2;
+    if (source.startsWith('type:')) return 3;
+    return 4;
+  };
+  return unique(
+    [...bySource.entries()].sort((a, b) => rank(a[0]) - rank(b[0])).flatMap(([, set]) => [...set]),
+  );
+}
+
+/** Unwrap our PicnicCallError so the real HTTP failure is visible. */
+function describeError(err: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let i = 0; i < 4 && current; i++) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(' → ');
 }
 
 function unique<T>(values: T[]): T[] {
