@@ -43,7 +43,12 @@ interface Found {
 async function main(): Promise<void> {
   const dataDir = process.env['DATA_DIR'] ?? './data';
   const outDir = join(dataDir, 'capture');
-  const pagePath = join(outDir, 'recipes-page.json');
+  // Any captured file can be inspected, not just the big overview — the probe
+  // responses are Fusion pages too, and much smaller.
+  const fileName =
+    process.argv.find((a) => a.startsWith('--file='))?.slice('--file='.length) ??
+    'recipes-page.json';
+  const pagePath = join(outDir, fileName);
 
   let page: unknown;
   try {
@@ -203,6 +208,42 @@ async function main(): Promise<void> {
   say(`  (${catalogue.size} recipes with names in total)`);
   say();
 
+  // ── 6b. Page-id vocabulary ──────────────────────────────────────────
+  // Fusion pages are addressed by a registry id, and a wrong id gets you
+  // "page with id 'x' was not found" — which is exactly how the documented
+  // recipe-details page failed. The app's own deep links (app.picnic://store/
+  // page;id=<pageId>) enumerate the ids that genuinely exist, so this is the
+  // authoritative list of what we may request.
+  const pageIds = new Map<string, number>();
+  forEachNodeWithPath(page, (node) => {
+    if (typeof node !== 'string') return;
+    for (const m of node.matchAll(/store\/page;id=([A-Za-z0-9._-]+)/g)) {
+      const pid = m[1];
+      if (pid) pageIds.set(pid, (pageIds.get(pid) ?? 0) + 1);
+    }
+  });
+  say('--- Fusion page ids referenced by the app (these are known to exist) ---');
+  for (const [pid, n] of topN(pageIds, 40)) say(`  ${n.toString().padStart(5)}  ${pid}`);
+  if (pageIds.size === 0) say('  (none found)');
+  say();
+
+  // ── 6c. Navigation actions ──────────────────────────────────────────
+  // Buttons carry the next page to open. On a bottom sheet, one of these is
+  // the route to the full recipe.
+  const actions: string[] = [];
+  forEachObject(page, (obj) => {
+    const id = typeof obj['id'] === 'string' ? obj['id'] : '';
+    const pageId = obj['page_id'] ?? obj['pageId'];
+    if (typeof pageId === 'string') {
+      actions.push(`page_id=${pageId}${id ? `  (on id=${id})` : ''}`);
+    }
+  });
+  if (actions.length > 0) {
+    say('--- Explicit page_id navigation targets ---');
+    for (const a of unique(actions).slice(0, 30)) say(`  ${a}`);
+    say();
+  }
+
   // ── 7. Optional: dump one subtree by path ───────────────────────────
   // Pass --path=$.layout.body.… to see a specific node in full. Used to read
   // the "Bewaard" pill's onPress handler, which is what reveals the request
@@ -216,6 +257,15 @@ async function main(): Promise<void> {
     } else {
       say(indent(JSON.stringify(prune(node, 8, 4, 300), null, 2), 4));
     }
+    say();
+  }
+
+  // ── 7b. Optional: dump the whole (pruned) document ──────────────────
+  // Practical for the small probe responses; the 16 MB overview would be
+  // unreadable, so this is opt-in.
+  if (process.argv.includes('--dump')) {
+    say('--- Full pruned document ---');
+    say(indent(JSON.stringify(prune(page, 12, 6, 200), null, 2), 2));
     say();
   }
 
@@ -238,16 +288,22 @@ async function main(): Promise<void> {
     typeCounts: Object.fromEntries(topN(typeCounts, 60)),
   };
 
-  const slicePath = join(outDir, 'favourites-slice.json');
-  const cataloguePath = join(outDir, 'recipes-catalogue.json');
+  // Suffix outputs by input file so inspecting a probe response does not
+  // overwrite the overview's report.
+  const stem = fileName.replace(/\.json$/i, '');
+  const suffix = stem === 'recipes-page' ? '' : `-${stem}`;
+  const slicePath = join(outDir, `favourites-slice${suffix}.json`);
+  const cataloguePath = join(outDir, `recipes-catalogue${suffix}.json`);
+  const reportPath = join(outDir, `inspect-report${suffix}.txt`);
+
   await writeFile(slicePath, JSON.stringify(slice, null, 2), { mode: 0o600 });
   await writeFile(cataloguePath, JSON.stringify([...catalogue.values()], null, 2), { mode: 0o600 });
-  await writeFile(join(outDir, 'inspect-report.txt'), report.join('\n'), { mode: 0o600 });
+  await writeFile(reportPath, report.join('\n'), { mode: 0o600 });
 
   console.log();
   console.log(`Wrote ${slicePath}`);
   console.log(`Wrote ${cataloguePath}  (${catalogue.size} recipes)`);
-  console.log(`Wrote ${join(outDir, 'inspect-report.txt')}`);
+  console.log(`Wrote ${reportPath}`);
   console.log();
   console.log('All small. Send the report (or paste it) to continue.');
 }
@@ -352,6 +408,10 @@ function resolvePath(root: unknown, path: string): unknown {
     }
   }
   return current;
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
 }
 
 function topN(counts: Map<string, number>, n: number): Array<[string, number]> {
