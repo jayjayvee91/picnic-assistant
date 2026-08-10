@@ -39,24 +39,42 @@ function requireEnv(name: string): string {
   return value;
 }
 
-/** Candidate endpoints, best-guess first. */
+/**
+ * Candidate endpoints, best-guess first.
+ *
+ * These are no longer guesses: the overview page's own deep links enumerate
+ * the Fusion page ids that actually exist, and `recipe-details-page-root` (the
+ * one the library calls) is not among them. `selling-group-details-page` is —
+ * and Picnic calls recipes "selling groups" throughout, so that is the page a
+ * recipe tile leads to.
+ *
+ * `action-bottom-sheet` is kept only for reference: it answers, but its body
+ * is a SUSPENSE placeholder that defers to `action-bottom-sheet-content`, so
+ * the sheet itself carries no recipe data.
+ */
 function candidates(id: string): Array<{ label: string; path: string }> {
   const enc = encodeURIComponent(id);
   return [
-    // Plain REST — if this works, we get structured JSON, no PML parsing.
-    { label: 'REST /recipes/{id}', path: `/recipes/${enc}` },
-    // What the library currently calls, so we capture its real error.
     {
-      label: 'Fusion recipe-details-page-root',
-      path: `/pages/recipe-details-page-root?recipe_id=${enc}`,
+      label: 'selling-group-details-page (id)',
+      path: `/pages/selling-group-details-page?id=${enc}`,
     },
-    // The page the app's own deep links open when a recipe tile is tapped.
-    { label: 'Fusion action-bottom-sheet', path: `/pages/action-bottom-sheet?id=${enc}` },
-    // Recipes are "selling groups" in Picnic's vocabulary; try that spelling.
     {
-      label: 'Fusion recipe-details (selling_group_id)',
-      path: `/pages/recipe-details-page-root?selling_group_id=${enc}`,
+      label: 'selling-group-details-page (selling_group_id)',
+      path: `/pages/selling-group-details-page?selling_group_id=${enc}`,
     },
+    {
+      label: 'selling-group-details-page (recipe_id)',
+      path: `/pages/selling-group-details-page?recipe_id=${enc}`,
+    },
+    // The deferred content the bottom sheet actually loads.
+    {
+      label: 'action-bottom-sheet-content',
+      path: `/pages/action-bottom-sheet-content?id=${enc}`,
+    },
+    // Saved-recipes surfaces discovered in the page-id vocabulary. No id needed.
+    { label: 'my-recipes-page-root', path: `/pages/my-recipes-page-root` },
+    { label: 'saved-deep-dive-page', path: `/pages/saved-deep-dive-page` },
   ];
 }
 
@@ -68,8 +86,12 @@ async function main(): Promise<void> {
   const outDir = join(dataDir, 'capture');
 
   const id = process.argv.find((a) => a.startsWith('--id='))?.split('=')[1];
-  if (!id) {
+  // `--page=` probes one arbitrary page id, for following a lead without
+  // editing the candidate list.
+  const singlePage = process.argv.find((a) => a.startsWith('--page='))?.slice('--page='.length);
+  if (!id && !singlePage) {
     console.error('Usage: npm run capture:probe -- --id=<recipeId>');
+    console.error('   or: npm run capture:probe -- --page=<pageId> [--id=<recipeId>]');
     console.error('Pick an id from data/capture/recipes-catalogue.json.');
     process.exit(1);
   }
@@ -94,10 +116,19 @@ async function main(): Promise<void> {
     report.push(line);
   };
 
-  say(`Probing recipe id: ${id}`);
+  const toProbe = singlePage
+    ? [
+        {
+          label: singlePage,
+          path: `/pages/${singlePage}${id ? `?id=${encodeURIComponent(id)}` : ''}`,
+        },
+      ]
+    : candidates(id ?? '');
+
+  say(id ? `Probing recipe id: ${id}` : `Probing page: ${singlePage ?? ''}`);
   say();
 
-  for (const { label, path } of candidates(id)) {
+  for (const { label, path } of toProbe) {
     say(`--- ${label} ---`);
     say(`    GET ${path}`);
     try {

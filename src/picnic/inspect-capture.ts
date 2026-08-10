@@ -244,6 +244,53 @@ async function main(): Promise<void> {
     say();
   }
 
+  // ── 6d. Pill → selling-group ranges (THE saved-recipes list) ────────
+  // Each segment pill on the meals page carries, inside its onPress payload,
+  // the exact set of selling-group (recipe) ids that pill shows:
+  //
+  //   props.v13      = the pill's display name, e.g. "Bewaard"
+  //   props.__ep2.v4 = the ids that pill lists
+  //   props.__ep2.v5 = how many
+  //   props.__ep2.v6 = "meal-section-pill-selling-group-range"
+  //
+  // So the household's saved recipes are enumerated in the overview payload
+  // after all — no second request needed to learn WHICH recipes are saved.
+  const pillRanges: Array<{ pill: string; count: number; ids: string[] }> = [];
+  forEachObject(page, (obj) => {
+    const ep2 = obj['__ep2'];
+    if (!ep2 || typeof ep2 !== 'object') return;
+    const inner = ep2 as Record<string, unknown>;
+    const ids = inner['v4'];
+    if (!Array.isArray(ids)) return;
+    const onlyIds = ids.filter(
+      (v): v is string => typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v),
+    );
+    if (onlyIds.length === 0) return;
+    const pill = typeof obj['v13'] === 'string' ? obj['v13'] : '(unnamed pill)';
+    const count = typeof inner['v5'] === 'number' ? inner['v5'] : onlyIds.length;
+    pillRanges.push({ pill, count, ids: onlyIds });
+  });
+
+  // Same pill appears in several handlers; keep the richest copy of each.
+  const bestPerPill = new Map<string, { pill: string; count: number; ids: string[] }>();
+  for (const r of pillRanges) {
+    const existing = bestPerPill.get(r.pill);
+    if (!existing || r.ids.length > existing.ids.length) bestPerPill.set(r.pill, r);
+  }
+
+  say('--- Segment pills and the recipe ids they list ---');
+  if (bestPerPill.size === 0) {
+    say('  (none found)');
+  }
+  for (const r of bestPerPill.values()) {
+    say(`  "${r.pill}" — ${r.count} recipes, ${r.ids.length} ids captured`);
+    for (const id of r.ids) {
+      const known = catalogue.get(id);
+      say(`      ${id}${known ? `  ${known.name}` : '  (name not in this payload)'}`);
+    }
+  }
+  say();
+
   // ── 7. Optional: dump one subtree by path ───────────────────────────
   // Pass --path=$.layout.body.… to see a specific node in full. Used to read
   // the "Bewaard" pill's onPress handler, which is what reveals the request
@@ -299,6 +346,24 @@ async function main(): Promise<void> {
   await writeFile(slicePath, JSON.stringify(slice, null, 2), { mode: 0o600 });
   await writeFile(cataloguePath, JSON.stringify([...catalogue.values()], null, 2), { mode: 0o600 });
   await writeFile(reportPath, report.join('\n'), { mode: 0o600 });
+
+  if (bestPerPill.size > 0) {
+    const pillsPath = join(outDir, `pill-recipe-ids${suffix}.json`);
+    await writeFile(
+      pillsPath,
+      JSON.stringify(
+        [...bestPerPill.values()].map((r) => ({
+          pill: r.pill,
+          count: r.count,
+          recipes: r.ids.map((id) => ({ id, name: catalogue.get(id)?.name ?? null })),
+        })),
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    console.log(`Wrote ${pillsPath}`);
+  }
 
   console.log();
   console.log(`Wrote ${slicePath}`);
