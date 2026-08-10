@@ -19,6 +19,7 @@
     "smoke:memory": "tsx src/memory/smoke.ts",
     "smoke:agent": "tsx src/agent/smoke.ts",
     "smoke:allergen": "tsx src/allergen/smoke.ts",
+    "smoke:recipe": "tsx src/recipe/smoke.ts",
     "capture:recipes": "tsx src/picnic/capture-recipes.ts",
     "capture:inspect": "tsx src/picnic/inspect-capture.ts",
     "capture:probe": "tsx src/picnic/probe-recipe.ts",

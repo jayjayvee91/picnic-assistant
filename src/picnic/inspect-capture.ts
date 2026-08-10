@@ -264,10 +264,12 @@ async function main(): Promise<void> {
     const pid = cfgObj['id'];
     if (typeof pid !== 'string') return;
     const params = cfgObj['parameters'];
+    // Parameter values are truncated: pages carry a `feature_flags` blob of
+    // several hundred entries that buries everything else in the report.
     const paramDesc =
       params && typeof params === 'object'
         ? Object.entries(params as Record<string, unknown>)
-            .map(([k, v]) => `${k}=${v === null ? 'null' : JSON.stringify(v)}`)
+            .map(([k, v]) => `${k}=${truncate(v === null ? 'null' : JSON.stringify(v), 120)}`)
             .join(', ')
         : '(no parameters)';
     deferred.push(`${pid}  ?  ${paramDesc}`);
