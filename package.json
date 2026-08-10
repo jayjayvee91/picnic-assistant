@@ -20,6 +20,7 @@
     "smoke:agent": "tsx src/agent/smoke.ts",
     "smoke:allergen": "tsx src/allergen/smoke.ts",
     "capture:recipes": "tsx src/picnic/capture-recipes.ts",
+    "capture:inspect": "tsx src/picnic/inspect-capture.ts",
     "start:telegram": "tsx src/telegram/run.ts",
     "setup-hooks": "git config core.hooksPath .githooks"
   },
