@@ -137,6 +137,13 @@ const detailsPage = {
           portions: 4,
           sellableId: '6335ac14ce42386977937080',
           sellingUnitIds: ['s1012860', 's1011130', 's1115349'],
+          // Only the first two are ticked when the recipe opens; the third is
+          // an offered pantry extra. Mirrors the real page, where 6 of 15
+          // ingredients were pre-selected.
+          defaultSelectedIngredientIds: [
+            '60095cf0-022e-47a9-88a7-ca02b6227f02',
+            'd56bfb1a-ac5b-4816-acaa-dd3dc43e2a0c',
+          ],
           ingredientsState: [
             {
               ingredientId: '60095cf0-022e-47a9-88a7-ca02b6227f02',
@@ -256,6 +263,21 @@ check(
   'distinguishes CORE from non-core',
   ing.find((i) => i.articleId === 's1012860')?.core === true,
 );
+
+// The selected/optional split decides what a shopping list contains. On the
+// real page 15 ingredients totalled €48.33 but only the 6 pre-selected ones
+// (€11.80) were actually needed, so getting this wrong would quadruple a
+// week's grocery bill.
+check(
+  'marks pre-selected ingredients as selected',
+  ing.find((i) => i.articleId === 's1012860')?.selected === true,
+);
+check(
+  'marks offered extras as NOT selected',
+  ing.find((i) => i.articleId === 's1115349')?.selected === false,
+  JSON.stringify(ing.map((i) => [i.articleId, i.selected])),
+);
+check('only the pre-selected count toward a list', ing.filter((i) => i.selected).length === 2);
 check('non-core is marked as such', ing.find((i) => i.articleId === 's1115349')?.core === false);
 
 // The analytics context alone must still work — it is the fallback path when
@@ -296,7 +318,47 @@ const fallback = parseRecipeDetails(analyticsOnly, '6335ac14ce42386977937080');
 check('falls back to analytics', fallback !== null);
 check('fallback reads article ids', fallback?.ingredients[0]?.articleId === 's1');
 check('fallback reads quantity', fallback?.ingredients[0]?.requiredAmount === 3);
-check('fallback drops unchecked ingredients', fallback?.ingredients.length === 1);
+check('fallback keeps both ingredients', fallback?.ingredients.length === 2);
+check(
+  'fallback marks the unchecked one as not selected',
+  fallback?.ingredients.find((i) => i.articleId === 's2')?.selected === false,
+);
+check(
+  'fallback marks the checked one as selected',
+  fallback?.ingredients.find((i) => i.articleId === 's1')?.selected === true,
+);
+
+// Without an explicit selection list the parser must not mark pantry extras as
+// "buy this" — it falls back to the CORE flag rather than defaulting to true.
+console.log('\nNo selection list present');
+const noSelection = parseRecipeDetails(
+  {
+    body: {
+      state: {
+        ingredientsState: [
+          {
+            ingredientId: 'a',
+            ingredientType: 'CORE',
+            isAvailable: true,
+            sellingUnits: { s1: { price: 1, requiredAmount: 1, sellingUnitId: 's1' } },
+          },
+          {
+            ingredientId: 'b',
+            ingredientType: 'NON_CORE',
+            isAvailable: true,
+            sellingUnits: { s2: { price: 1, requiredAmount: 1, sellingUnitId: 's2' } },
+          },
+        ],
+      },
+    },
+  },
+  'x',
+);
+check(
+  'falls back to CORE when no selection list exists',
+  noSelection?.ingredients.find((i) => i.articleId === 's1')?.selected === true &&
+    noSelection?.ingredients.find((i) => i.articleId === 's2')?.selected === false,
+);
 
 console.log('\nUnparseable input');
 check(

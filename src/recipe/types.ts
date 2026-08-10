@@ -45,11 +45,24 @@ export interface RecipeIngredient {
   /** False when Picnic currently cannot supply it. */
   available: boolean;
   /**
-   * CORE ingredients define the dish; non-core are pantry extras the app
-   * pre-selects less aggressively. Kept so the agent can treat "olive oil you
-   * already own" differently from "the chorizo".
+   * CORE ingredients define the dish; non-core are pantry extras. Kept so the
+   * agent can treat "olive oil you already own" differently from "the chorizo".
    */
   core: boolean;
+  /**
+   * Whether Picnic pre-selects this ingredient when you open the recipe —
+   * i.e. whether it lands in the basket by default.
+   *
+   * This is the field that decides what a shopping list should contain, and it
+   * matters far more than it looks. A real example: "Tomatenrisotto met
+   * spinazie en chorizo" lists 15 ingredients totalling €48.33, but only the 6
+   * pre-selected ones (€11.80) are what you actually need to buy. The other 9
+   * are pantry staples — oil, parmesan, stock — that Picnic offers and leaves
+   * unticked because most households already have them.
+   *
+   * Adding all 15 would turn a five-recipe week from ~€59 into ~€242.
+   */
+  selected: boolean;
 }
 
 /** A recipe with everything needed to build a shopping list from it. */

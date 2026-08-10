@@ -120,6 +120,16 @@ function parseFromState(page: unknown): RecipeIngredient[] {
   const out: RecipeIngredient[] = [];
   const seen = new Set<string>();
 
+  // `defaultSelectedIngredientIds` is what the app ticks when you open the
+  // recipe — the true shopping list. Everything else is an offered extra.
+  // Collected first so it is available while walking the ingredients.
+  const preSelected = new Set<string>();
+  forEachObject(page, (obj) => {
+    const ids = obj['defaultSelectedIngredientIds'];
+    if (!Array.isArray(ids)) return;
+    for (const id of ids) if (typeof id === 'string') preSelected.add(id);
+  });
+
   forEachObject(page, (obj) => {
     const list = obj['ingredientsState'];
     if (!Array.isArray(list)) return;
@@ -143,6 +153,11 @@ function parseFromState(page: unknown): RecipeIngredient[] {
         priceCents: unit?.price ?? null,
         available: entry.isAvailable !== false,
         core: entry.ingredientType === 'CORE',
+        // Fall back to the CORE flag only when the page carried no explicit
+        // selection list, so a layout change cannot silently mark every
+        // pantry extra as "buy this".
+        selected:
+          preSelected.size > 0 ? preSelected.has(ingredientId) : entry.ingredientType === 'CORE',
       });
     }
   });
@@ -170,8 +185,6 @@ function parseFromAnalytics(page: unknown): RecipeIngredient[] {
       const ingredientId = asString(entry['ingredient_id']);
       const articleId = asString(entry['selling_unit_id']);
       if (!ingredientId || seen.has(ingredientId)) continue;
-      // Skip ingredients the household unchecked in the app.
-      if (entry['checked'] === false) continue;
       seen.add(ingredientId);
       out.push({
         ingredientId,
@@ -181,6 +194,8 @@ function parseFromAnalytics(page: unknown): RecipeIngredient[] {
         priceCents: null,
         available: entry['status'] !== 'UNAVAILABLE',
         core: true,
+        // `checked` is this path's equivalent of the selection list.
+        selected: entry['checked'] !== false,
       });
     }
   });

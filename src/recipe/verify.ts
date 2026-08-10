@@ -115,7 +115,8 @@ async function main(): Promise<void> {
     console.log(`Ingredients: ${details.ingredients.length}\n`);
     for (const ing of details.ingredients) {
       const flags = [
-        ing.core ? 'core' : 'extra',
+        ing.selected ? 'SELECTED' : 'optional extra',
+        ing.core ? 'core' : '',
         ing.available ? '' : 'UNAVAILABLE',
         ing.articleId ? '' : 'NO ARTICLE ID',
       ]
@@ -127,6 +128,31 @@ async function main(): Promise<void> {
       );
     }
     console.log('');
+
+    // The selected/optional split is what keeps a shopping list honest: Picnic
+    // offers pantry staples alongside the real ingredients, and buying all of
+    // them multiplies the cost of a week's menu several times over.
+    const sum = (list: typeof details.ingredients): number =>
+      list.reduce((n, i) => n + (i.priceCents ?? 0) * i.requiredAmount, 0);
+    const selected = details.ingredients.filter((i) => i.selected);
+    const optional = details.ingredients.filter((i) => !i.selected);
+    const eur = (cents: number): string => `€${(cents / 100).toFixed(2)}`;
+
+    console.log(`  Pre-selected by Picnic: ${selected.length} items, ${eur(sum(selected))}`);
+    console.log(`  Offered extras:         ${optional.length} items, ${eur(sum(optional))}`);
+    console.log(
+      `  Everything:             ${details.ingredients.length} items, ${eur(sum(details.ingredients))}`,
+    );
+    console.log('');
+    console.log('  A shopping list should use the pre-selected set. The extras are');
+    console.log('  pantry staples (oil, cheese, stock) the household likely already has.');
+    console.log('');
+
+    if (selected.length === 0) {
+      console.error('WARNING: no ingredient is marked as pre-selected — the selection');
+      console.error('signal may have moved, which would make shopping lists wrong.');
+      problems++;
+    }
 
     // The whole design rests on ingredients resolving to real article ids —
     // that is what lets the gluten guard and brand rules act exactly rather
