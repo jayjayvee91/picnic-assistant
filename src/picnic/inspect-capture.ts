@@ -244,6 +244,39 @@ async function main(): Promise<void> {
     say();
   }
 
+  // ── 6c2. Deferred content pages ─────────────────────────────────────
+  // Fusion pages routinely return a shell whose real content is loaded by a
+  // second request: a SUSPENSE node (or an onMount RELOAD) carries a
+  // `pageConfig` naming the page id to fetch and the parameters to pass.
+  //
+  // This is why two "successful" probes looked empty. `action-bottom-sheet`
+  // deferred to `action-bottom-sheet-content`, and `saved-deep-dive-page` —
+  // whose header title is literally "Bewaard" — defers to
+  // `saved-deep-dive-page-content`. The shell is never where the data is.
+  //
+  // Reporting these turns "the page came back empty" into "here is the exact
+  // follow-up request to make".
+  const deferred: string[] = [];
+  forEachObject(page, (obj) => {
+    const cfg = obj['pageConfig'];
+    if (!cfg || typeof cfg !== 'object') return;
+    const cfgObj = cfg as Record<string, unknown>;
+    const pid = cfgObj['id'];
+    if (typeof pid !== 'string') return;
+    const params = cfgObj['parameters'];
+    const paramDesc =
+      params && typeof params === 'object'
+        ? Object.entries(params as Record<string, unknown>)
+            .map(([k, v]) => `${k}=${v === null ? 'null' : JSON.stringify(v)}`)
+            .join(', ')
+        : '(no parameters)';
+    deferred.push(`${pid}  ?  ${paramDesc}`);
+  });
+  say('--- Deferred content pages (fetch these next) ---');
+  if (deferred.length === 0) say('  (none)');
+  for (const d of unique(deferred).slice(0, 20)) say(`  ${d}`);
+  say();
+
   // ── 6d. Every array of recipe ids, largest first ────────────────────
   // This is the "am I seeing all of them?" check, and it is deliberately
   // exhaustive rather than targeted.

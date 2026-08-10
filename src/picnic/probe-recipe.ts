@@ -75,6 +75,11 @@ function candidates(id: string): Array<{ label: string; path: string }> {
     // Saved-recipes surfaces discovered in the page-id vocabulary. No id needed.
     { label: 'my-recipes-page-root', path: `/pages/my-recipes-page-root` },
     { label: 'saved-deep-dive-page', path: `/pages/saved-deep-dive-page` },
+    // saved-deep-dive-page returns only a shell: its header title is "Bewaard"
+    // but it holds no recipes, deferring them to a -content page exactly as
+    // action-bottom-sheet does. This is where the saved list actually lives.
+    { label: 'saved-deep-dive-page-content', path: `/pages/saved-deep-dive-page-content` },
+    { label: 'my-recipes-page-content', path: `/pages/my-recipes-page-content` },
   ];
 }
 
