@@ -254,14 +254,35 @@ export class PicnicClient {
   }
 
   /**
-   * The detail page for one recipe — ingredients, steps, servings, pricing.
-   * Also a Fusion page, so the same "needs a real sample before we can parse
-   * it" caveat as `getRecipesPage` applies.
+   * The household's SAVED recipes ("Bewaard"), in full.
+   *
+   * Not `getRecipesPage()`: that returns the meals landing page, whose saved
+   * section is a carousel capped at 12 regardless of how many are saved. This
+   * endpoint returned all 96 for a household with 60+ saved.
+   *
+   * Note the two-step shape — `saved-deep-dive-page` is only a shell whose
+   * header reads "Bewaard"; the recipes live in the `-content` page, which is
+   * what we request directly.
+   */
+  async getSavedRecipesPage(): Promise<FusionPage> {
+    return this.rawGet<FusionPage>('/pages/saved-deep-dive-page-content');
+  }
+
+  /**
+   * The detail page for one recipe — ingredients, portions, steps, pricing.
+   *
+   * The parameter name matters: `?id=` and `?recipe_id=` both fail with a
+   * render error, and only `selling_group_id` works. Picnic calls recipes
+   * "selling groups" internally.
+   *
+   * NOT `recipe.getRecipeDetailsPage()` — the library points at
+   * `recipe-details-page-root`, a page id that no longer exists (Picnic
+   * answers "page with id ... was not found"). That method is broken in
+   * picnic-api 4.4.0; this replaces it.
    */
   async getRecipeDetailsPage(recipeId: string): Promise<FusionPage> {
-    return this.callAuthed(
-      () => this.inner.recipe.getRecipeDetailsPage(recipeId),
-      'getRecipeDetailsPage',
+    return this.rawGet<FusionPage>(
+      `/pages/selling-group-details-page?selling_group_id=${encodeURIComponent(recipeId)}`,
     );
   }
 

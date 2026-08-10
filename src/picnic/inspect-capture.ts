@@ -277,6 +277,41 @@ async function main(): Promise<void> {
   for (const d of unique(deferred).slice(0, 20)) say(`  ${d}`);
   say();
 
+  // ── 6c3. Ingredient + article structures ────────────────────────────
+  // On a recipe detail page this is the payload that matters: which
+  // ingredients the recipe needs, and — critically — which Picnic articles
+  // they map to, since the gluten guard and the brand-preference logic both
+  // work on article ids.
+  //
+  // Objects are grouped by their key SHAPE rather than listed individually,
+  // because a detail page repeats the same node type once per ingredient;
+  // seeing the shape once, with a count, is what a parser needs.
+  const shapeSamples = new Map<string, { count: number; sample: unknown; path: string }>();
+  forEachNodeWithPath(page, (node, path) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    const obj = node as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 0 || keys.length > 25) return;
+    const relevant = keys.some((k) =>
+      /ingredient|article|selling_unit|sole_article|portion|quantity|amount|unit/i.test(k),
+    );
+    if (!relevant) return;
+    const shape = keys.sort().join(',');
+    const existing = shapeSamples.get(shape);
+    if (existing) existing.count++;
+    else shapeSamples.set(shape, { count: 1, sample: node, path });
+  });
+
+  say('--- Ingredient / article node shapes (most frequent first) ---');
+  const shapes = [...shapeSamples.entries()].sort((a, b) => b[1].count - a[1].count);
+  if (shapes.length === 0) say('  (none)');
+  for (const [shape, info] of shapes.slice(0, 8)) {
+    say(`  ×${info.count}  {${truncate(shape, 160)}}`);
+    say(`       at ${truncate(info.path, 130)}`);
+    say(indent(JSON.stringify(prune(info.sample, 4, 3, 120), null, 2), 8));
+    say();
+  }
+
   // ── 6d. Every array of recipe ids, largest first ────────────────────
   // This is the "am I seeing all of them?" check, and it is deliberately
   // exhaustive rather than targeted.
