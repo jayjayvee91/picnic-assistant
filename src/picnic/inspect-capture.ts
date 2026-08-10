@@ -244,19 +244,66 @@ async function main(): Promise<void> {
     say();
   }
 
-  // ── 6d. Pill → selling-group ranges (THE saved-recipes list) ────────
-  // Each segment pill on the meals page carries, inside its onPress payload,
-  // the exact set of selling-group (recipe) ids that pill shows:
+  // ── 6d. Every array of recipe ids, largest first ────────────────────
+  // This is the "am I seeing all of them?" check, and it is deliberately
+  // exhaustive rather than targeted.
   //
-  //   props.v13      = the pill's display name, e.g. "Bewaard"
-  //   props.__ep2.v4 = the ids that pill lists
-  //   props.__ep2.v5 = how many
-  //   props.__ep2.v6 = "meal-section-pill-selling-group-range"
+  // An earlier pass reported a "Bewaard" pill listing 12 recipes and treated
+  // that as the household's saved set. It is not: that pill belongs to ONE
+  // campaign section of the meals page, so its 12 ids are what that carousel
+  // previews, not everything the household has saved. Reading a section
+  // preview as the complete list is exactly the mistake this section exists to
+  // prevent — so instead of trusting one well-known field, enumerate every id
+  // array in the payload and let the sizes speak.
   //
-  // So the household's saved recipes are enumerated in the overview payload
-  // after all — no second request needed to learn WHICH recipes are saved.
-  const pillRanges: Array<{ pill: string; count: number; ids: string[] }> = [];
-  forEachObject(page, (obj) => {
+  // If the true saved list is present at all, it shows up here as a large
+  // array. If the largest array is still far short of what the app displays,
+  // that is positive evidence the full list is NOT in this payload and must be
+  // fetched from a dedicated page.
+  const idArrays: Array<{ path: string; ids: string[]; label: string }> = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (!Array.isArray(node) || node.length === 0) return;
+    const ids = node.filter((v): v is string => typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v));
+    // Require the array to be mostly ids, so we skip mixed content arrays.
+    if (ids.length < 2 || ids.length < node.length * 0.8) return;
+    idArrays.push({ path, ids, label: labelForPath(path) });
+  });
+  idArrays.sort((a, b) => b.ids.length - a.ids.length);
+
+  say('--- Every array of recipe ids, largest first (top 15) ---');
+  if (idArrays.length === 0) say('  (none found)');
+  for (const arr of idArrays.slice(0, 15)) {
+    say(`  ${arr.ids.length.toString().padStart(4)} ids  ${arr.label}`);
+    say(`         at ${truncate(arr.path, 150)}`);
+  }
+  const biggest = idArrays[0];
+  say();
+  say(
+    `  Largest id array in this payload: ${biggest ? biggest.ids.length : 0}. ` +
+      'If the app shows more saved recipes than that, the full list is NOT in ' +
+      'this page and needs its own request (see saved-deep-dive-page / ' +
+      'my-recipes-page-root).',
+  );
+  say();
+
+  // Distinct ids across the WHOLE payload, as an upper bound on what this
+  // single page could possibly know about.
+  const allIds = new Set<string>();
+  forEachNodeWithPath(page, (node) => {
+    if (typeof node === 'string' && /^[0-9a-f]{24}$/i.test(node)) allIds.add(node);
+  });
+  say(`  Distinct 24-hex ids anywhere in this payload: ${allIds.size}`);
+  say(`  Recipes with a name recovered from deep links: ${catalogue.size}`);
+  say();
+
+  // ── 6e. Named segment pills ─────────────────────────────────────────
+  // Reported per occurrence, NOT deduplicated by name: a pill name can appear
+  // in several sections, and collapsing them would hide the fact that each
+  // carries a different, partial set.
+  const pillRanges: Array<{ pill: string; count: number; ids: string[]; path: string }> = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    const obj = node as Record<string, unknown>;
     const ep2 = obj['__ep2'];
     if (!ep2 || typeof ep2 !== 'object') return;
     const inner = ep2 as Record<string, unknown>;
@@ -267,28 +314,42 @@ async function main(): Promise<void> {
     );
     if (onlyIds.length === 0) return;
     const pill = typeof obj['v13'] === 'string' ? obj['v13'] : '(unnamed pill)';
+    // v5 is the count the app reports for the pill; when it exceeds the ids
+    // actually embedded, the payload is holding a preview, not the full set.
     const count = typeof inner['v5'] === 'number' ? inner['v5'] : onlyIds.length;
-    pillRanges.push({ pill, count, ids: onlyIds });
+    pillRanges.push({ pill, count, ids: onlyIds, path });
   });
 
-  // Same pill appears in several handlers; keep the richest copy of each.
+  say('--- Segment pills and the recipe ids they carry (every occurrence) ---');
+  if (pillRanges.length === 0) say('  (none found)');
+  for (const r of pillRanges.slice(0, 20)) {
+    const partial = r.count > r.ids.length ? '  ← PARTIAL: reports more than it embeds' : '';
+    say(`  "${r.pill}" — reports ${r.count}, embeds ${r.ids.length} ids${partial}`);
+    say(`       at ${truncate(r.path, 140)}`);
+  }
+  say(`  (${pillRanges.length} pill occurrences in total)`);
+  say();
+
   const bestPerPill = new Map<string, { pill: string; count: number; ids: string[] }>();
   for (const r of pillRanges) {
     const existing = bestPerPill.get(r.pill);
-    if (!existing || r.ids.length > existing.ids.length) bestPerPill.set(r.pill, r);
-  }
-
-  say('--- Segment pills and the recipe ids they list ---');
-  if (bestPerPill.size === 0) {
-    say('  (none found)');
-  }
-  for (const r of bestPerPill.values()) {
-    say(`  "${r.pill}" — ${r.count} recipes, ${r.ids.length} ids captured`);
-    for (const id of r.ids) {
-      const known = catalogue.get(id);
-      say(`      ${id}${known ? `  ${known.name}` : '  (name not in this payload)'}`);
+    if (!existing || r.ids.length > existing.ids.length) {
+      bestPerPill.set(r.pill, { pill: r.pill, count: r.count, ids: r.ids });
     }
   }
+  // Union across every occurrence of a pill name — a name split over several
+  // sections may cover more between them than any single occurrence does.
+  const unionPerPill = new Map<string, Set<string>>();
+  for (const r of pillRanges) {
+    let set = unionPerPill.get(r.pill);
+    if (!set) {
+      set = new Set();
+      unionPerPill.set(r.pill, set);
+    }
+    for (const id of r.ids) set.add(id);
+  }
+  say('--- Union of ids per pill name (across all its occurrences) ---');
+  for (const [pill, set] of unionPerPill) say(`  "${pill}": ${set.size} distinct ids`);
   say();
 
   // ── 7. Optional: dump one subtree by path ───────────────────────────
@@ -409,9 +470,13 @@ function forEachNodeWithPath(
   fn(value, path);
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
-    // Only descend into the first 40 entries of huge arrays; layout lists
-    // repeat the same shape and we only need the shape.
-    for (let i = 0; i < Math.min(value.length, 40); i++) {
+    // Descend into EVERY entry. An earlier version stopped at 40 on the theory
+    // that layout arrays repeat the same shape — but that assumption is fatal
+    // to the question "have I found all the saved recipes?", since a long list
+    // could sit past the cutoff and simply never be visited. Walking a 16 MB
+    // tree in full costs a couple of seconds; a silent blind spot costs a
+    // wrong answer.
+    for (let i = 0; i < value.length; i++) {
       forEachNodeWithPath(value[i], fn, `${path}[${i}]`, depth + 1);
     }
     return;
@@ -477,6 +542,16 @@ function resolvePath(root: unknown, path: string): unknown {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/** Short human label for a deep path: the last few meaningful segments. */
+function labelForPath(path: string): string {
+  const segments = path.split('.').filter((s) => s.length > 0 && s !== '$');
+  return segments.slice(-3).join('.') || path;
 }
 
 function topN(counts: Map<string, number>, n: number): Array<[string, number]> {
