@@ -60,6 +60,21 @@ export type ProductDetails = Awaited<ReturnType<Inner['catalog']['getProductDeta
 
 export type PicnicCountryCode = 'NL' | 'DE' | 'FR';
 
+/**
+ * The underlying client extends an HTTP client that exposes `sendRequest` for
+ * endpoints the library does not wrap. Typed structurally here so `rawGet`
+ * does not need an `any`.
+ */
+interface RawSender {
+  sendRequest<TReq, TRes>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    data?: TReq | null,
+    includePicnicHeaders?: boolean,
+    isImageRequest?: boolean,
+  ): Promise<TRes>;
+}
+
 export interface PicnicClientOptions {
   username: string;
   password: string;
@@ -247,6 +262,23 @@ export class PicnicClient {
     return this.callAuthed(
       () => this.inner.recipe.getRecipeDetailsPage(recipeId),
       'getRecipeDetailsPage',
+    );
+  }
+
+  /**
+   * Send a raw authenticated GET to an arbitrary Picnic path.
+   *
+   * DIAGNOSTIC USE ONLY — for the capture/probe scripts that map undocumented
+   * endpoints. Production code must go through a named method above, so the
+   * set of endpoints the bot depends on stays visible in one place.
+   *
+   * Deliberately GET-only: exploration should never be able to mutate the
+   * account, and a raw POST helper would make that possible by accident.
+   */
+  async rawGet<T>(path: string): Promise<T> {
+    return this.callAuthed(
+      () => (this.inner as unknown as RawSender).sendRequest<null, T>('GET', path, null, true),
+      `rawGet ${path}`,
     );
   }
 

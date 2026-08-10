@@ -179,6 +179,46 @@ async function main(): Promise<void> {
   say(`  (${tiles.length} such nodes in total)`);
   say();
 
+  // ── 6. The recipe catalogue, straight from the app's own deep links ──
+  // The tiles hide their names behind PML expression variables, but the
+  // navigation targets spell everything out:
+  //   …id=<recipeId>&image=<path>&name=<name>&source=SELLING_GROUP_TILE
+  // That is a complete id→name mapping without touching the template layer.
+  const catalogue = new Map<string, { id: string; name: string; image?: string }>();
+  for (const link of links) {
+    const id = /[?&,]id=([0-9a-f]{24})/i.exec(link)?.[1];
+    if (!id) continue;
+    const rawName = /[?&]name=([^&]+)/.exec(link)?.[1];
+    const rawImage = /[?&]image=([^&]+)/.exec(link)?.[1];
+    if (!rawName) continue;
+    catalogue.set(id, {
+      id,
+      name: safeDecode(rawName),
+      ...(rawImage ? { image: safeDecode(rawImage) } : {}),
+    });
+  }
+
+  say('--- Recipes recovered from deep links (first 20) ---');
+  for (const r of [...catalogue.values()].slice(0, 20)) say(`  ${r.id}  ${r.name}`);
+  say(`  (${catalogue.size} recipes with names in total)`);
+  say();
+
+  // ── 7. Optional: dump one subtree by path ───────────────────────────
+  // Pass --path=$.layout.body.… to see a specific node in full. Used to read
+  // the "Bewaard" pill's onPress handler, which is what reveals the request
+  // the app makes when that tab is tapped.
+  const wantPath = process.argv.find((a) => a.startsWith('--path='))?.slice('--path='.length);
+  if (wantPath) {
+    say(`--- Subtree at ${wantPath} ---`);
+    const node = resolvePath(page, wantPath);
+    if (node === undefined) {
+      say('  (path did not resolve)');
+    } else {
+      say(indent(JSON.stringify(prune(node, 8, 4, 300), null, 2), 4));
+    }
+    say();
+  }
+
   say('==================== END REPORT ====================');
 
   // ── 6. Write the bounded slice for deeper analysis ──────────────────
@@ -199,14 +239,17 @@ async function main(): Promise<void> {
   };
 
   const slicePath = join(outDir, 'favourites-slice.json');
+  const cataloguePath = join(outDir, 'recipes-catalogue.json');
   await writeFile(slicePath, JSON.stringify(slice, null, 2), { mode: 0o600 });
+  await writeFile(cataloguePath, JSON.stringify([...catalogue.values()], null, 2), { mode: 0o600 });
   await writeFile(join(outDir, 'inspect-report.txt'), report.join('\n'), { mode: 0o600 });
 
   console.log();
   console.log(`Wrote ${slicePath}`);
+  console.log(`Wrote ${cataloguePath}  (${catalogue.size} recipes)`);
   console.log(`Wrote ${join(outDir, 'inspect-report.txt')}`);
   console.log();
-  console.log('Both are small. Send the report (or paste it) to continue.');
+  console.log('All small. Send the report (or paste it) to continue.');
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -276,6 +319,39 @@ function prune(value: unknown, depth: number, maxArray: number, maxString: numbe
     return out;
   }
   return value;
+}
+
+/** Percent-decode without throwing on malformed input. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Resolve one of the dotted paths this report prints, e.g.
+ * `$.layout.body.child.children[0].id`. Only supports the syntax we emit.
+ */
+function resolvePath(root: unknown, path: string): unknown {
+  const cleaned = path.replace(/^\$\.?/, '');
+  if (cleaned.length === 0) return root;
+  let current: unknown = root;
+  for (const segment of cleaned.split('.')) {
+    const match = /^([^[]*)((\[\d+\])*)$/.exec(segment);
+    if (!match) return undefined;
+    const key = match[1] ?? '';
+    if (key.length > 0) {
+      if (!current || typeof current !== 'object') return undefined;
+      current = (current as Record<string, unknown>)[key];
+    }
+    for (const idx of (match[2] ?? '').matchAll(/\[(\d+)\]/g)) {
+      if (!Array.isArray(current)) return undefined;
+      current = current[Number(idx[1])];
+    }
+  }
+  return current;
 }
 
 function topN(counts: Map<string, number>, n: number): Array<[string, number]> {
