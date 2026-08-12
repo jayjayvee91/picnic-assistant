@@ -295,7 +295,21 @@ export const AGENT_TOOLS: Tool[] = [
   },
   {
     name: 'show_draft',
-    description: 'Return the current weekly draft (all items + quantities).',
+    description:
+      'Return the current weekly draft: items, quantities, per-item and total ' +
+      'price, and a FRESH gluten verdict for each item. Use this whenever the ' +
+      'user asks what is on the list or what it costs — do not add the prices ' +
+      'up yourself.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'clear_draft',
+    description:
+      'Empty the weekly draft completely. Use when the user wants to start ' +
+      'over ("begin opnieuw", "gooi de lijst weg", "wis alles"). The draft ' +
+      'survives restarts, so it can still hold items from a previous ' +
+      'conversation — clearing is the way to be sure you are starting fresh. ' +
+      'Does NOT touch the real Picnic cart.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -510,7 +524,9 @@ async function dispatch(
     case 'remove_from_draft':
       return handleRemoveFromDraft(ctx, input);
     case 'show_draft':
-      return handleShowDraft(ctx);
+      return await handleShowDraft(ctx);
+    case 'clear_draft':
+      return handleClearDraft(ctx);
     case 'commit_draft_to_cart':
       return await handleCommitDraft(ctx);
 
@@ -640,8 +656,80 @@ function handleRemoveFromDraft(ctx: AgentContext, input: Record<string, unknown>
   return { ok: true, draft: items };
 }
 
-function handleShowDraft(ctx: AgentContext): unknown {
-  return { draft: loadDraft(ctx.db, ctx.conversationKey) };
+/**
+ * Show the draft with FRESH verdicts and a computed total.
+ *
+ * Two problems this solves, both seen in a live weekly-draft run:
+ *
+ * 1. Verdicts were stored when an item was added and never revisited, so the
+ *    draft kept showing a stale warning on a product that a later fix had
+ *    since cleared. What the household reads must be what the guard currently
+ *    thinks, not what it thought last week.
+ * 2. Asked for a total, the model started adding ~25 prices by hand and gave
+ *    up mid-answer ("nog aan het berekenen…"). Arithmetic over a list belongs
+ *    in code.
+ *
+ * Re-checking costs nothing extra in practice: the allergen checker caches
+ * product pages, so items looked at earlier in the conversation are free.
+ */
+async function handleShowDraft(ctx: AgentContext): Promise<unknown> {
+  const items = loadDraft(ctx.db, ctx.conversationKey);
+  if (items.length === 0) {
+    return { draft: [], itemCount: 0, totalPriceEur: '0.00', note: 'De concept-lijst is leeg.' };
+  }
+
+  let totalCents = 0;
+  const detailed = [];
+  const unverified: string[] = [];
+  const blocked: string[] = [];
+
+  for (const item of items) {
+    const check = await ctx.allergen.check(item.articleId, item.articleName);
+    const lineCents = (check.priceCents ?? 0) * item.quantity;
+    totalCents += lineCents;
+
+    if (check.verdict === 'blocked') blocked.push(item.articleName);
+    if (check.verdict === 'unverified') unverified.push(item.articleName);
+
+    detailed.push({
+      articleId: item.articleId,
+      name: check.productName ?? item.articleName,
+      brand: check.brand,
+      quantity: item.quantity,
+      unitPriceEur: check.priceCents === null ? null : (check.priceCents / 100).toFixed(2),
+      linePriceEur: (lineCents / 100).toFixed(2),
+      gluten: check.verdict,
+      glutenReason: check.reason,
+    });
+  }
+
+  return {
+    draft: detailed,
+    itemCount: items.length,
+    totalPriceEur: (totalCents / 100).toFixed(2),
+    ...(unverified.length > 0 ? { unverified } : {}),
+    // An item can become blocked after it was added — a rulebook edit, or a
+    // fix like this one. Surfacing it here means the household finds out while
+    // reviewing, not when the commit refuses.
+    ...(blocked.length > 0
+      ? {
+          blocked,
+          blockedNote:
+            'Deze staan nog in de lijst maar bevatten gluten. Ze worden bij het ' +
+            'vastleggen geweigerd — haal ze eruit of vervang ze.',
+        }
+      : {}),
+  };
+}
+
+function handleClearDraft(ctx: AgentContext): unknown {
+  const had = loadDraft(ctx.db, ctx.conversationKey).length;
+  emptyDraft(ctx.db, ctx.conversationKey);
+  return {
+    ok: true,
+    removed: had,
+    note: `Concept-lijst geleegd (${had} item(s) verwijderd). De Picnic-mand zelf is niet aangeraakt.`,
+  };
 }
 
 async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
