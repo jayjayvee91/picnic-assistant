@@ -23,7 +23,7 @@ import { AllergenChecker } from '../allergen/index.js';
 import { prepareDataDir } from '../setup.js';
 import { PicnicRecipeSource, RecipeRegistry } from '../recipe/index.js';
 import { AgentAnthropicClient, AgentLoop, type AgentContext } from '../agent/index.js';
-import { startWeeklyNudge } from '../scheduler/index.js';
+import { startWeeklyNudge, startOrderSync } from '../scheduler/index.js';
 import { createBot } from './bot.js';
 
 function requireEnv(name: string): string {
@@ -109,10 +109,16 @@ async function main(): Promise<void> {
     envAllowedChatId: envChatId,
   });
 
+  // Keep the order history current. Without this the `orders` table only ever
+  // holds whatever the one-time backfill put there, and the purchase summary
+  // in the agent's system prompt goes stale the moment you shop again.
+  const orderSyncJob = startOrderSync({ db, picnic });
+
   // Graceful shutdown so Telegram releases the long-poll on exit.
   const stop = (signal: string): void => {
     console.log(`[telegram] received ${signal}, stopping bot…`);
     nudgeJob.stop();
+    orderSyncJob.stop();
     bot.stop(signal);
     db.close();
     process.exit(0);

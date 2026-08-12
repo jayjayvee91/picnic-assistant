@@ -158,12 +158,44 @@ journalctl -u picnic-assistant -f
 Look for these prefixes:
 - `[picnic]` — Picnic-adapter logs (auth, restored session, DRY_RUN writes)
 - `[telegram]` — bot lifecycle (start/stop, errors)
-- `[scheduler]` — cron logs (next-fire time, weekly nudge sent/skipped)
+- `[scheduler]` — cron logs (next-fire time, weekly nudge sent/skipped, order sync results)
 - `[bootstrap]` — order-history backfill notes (only on first run or after `--force`)
+- `[sync]` — incremental order-history sync warnings
 
 ---
 
 ## Common operations
+
+### Order-history sync
+
+The bot keeps its own order history current. A cron job inside the bot process
+runs daily at **03:30 Europe/Amsterdam**, plus once about five seconds after
+every startup — so a deploy also refreshes the history immediately.
+
+Each run pulls the list of completed deliveries, walks only those at or after
+the newest order already stored (minus a 3-day overlap, because Picnic
+finalises an order at delivery time), and upserts them. A typical run fetches
+zero or one delivery. It costs no Anthropic tokens — Picnic HTTP only — and it
+keeps running while the bot is `/stop`ped, so a paused weekend doesn't leave
+you with stale history on Monday.
+
+Confirm it ran:
+
+```
+journalctl -u picnic-assistant --no-pager | grep 'order sync'
+```
+
+You want a line like `order sync: nothing new since <date>` (steady state) or
+`order sync: recorded 1 order(s), 23 item(s), 0 failed`.
+
+If it reports `no usable order watermark`, the `orders` table is empty — the
+sync falls back to a 30-day window and full history needs the one-time backfill
+(`npm run smoke:memory`, see Step G).
+
+Note: only `COMPLETED` deliveries are synced. An in-flight (`CURRENT`) order is
+deliberately not recorded — nothing in the codebase deletes an order, so a
+cancelled one would linger forever and skew the averages behind the weekly
+suggestions.
 
 ### Updating the code
 

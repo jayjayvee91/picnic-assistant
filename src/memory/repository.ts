@@ -184,6 +184,19 @@ export function getRecentOrders(db: DB, limit: number): OrderRecord[] {
 }
 
 /**
+ * `creation_time` of the newest order we have stored, or null when the table
+ * is empty. The incremental sync uses this as its watermark so it only walks
+ * deliveries we might not have seen yet, instead of re-fetching months of
+ * history on every run.
+ */
+export function getNewestOrderCreationTime(db: DB): string | null {
+  const row = db.prepare(`SELECT MAX(creation_time) AS newest FROM orders`).get() as
+    | { newest: string | null }
+    | undefined;
+  return row?.newest ?? null;
+}
+
+/**
  * Free-text search across orders' items by article name.
  * Used by the agent's `search_order_history` tool — e.g. "have we ever bought soy sauce?".
  * Returns matching items with the order's date attached.

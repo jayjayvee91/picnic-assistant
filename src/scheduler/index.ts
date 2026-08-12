@@ -1,9 +1,8 @@
 /**
  * Public surface of the scheduler.
  *
- * For v1 there's exactly one scheduled job — the Thursday-20:00 weekly nudge.
- * Future jobs (incremental order-history sync, diff observation polling, etc.)
- * would land alongside, but we keep the surface minimal until they exist.
+ * Two scheduled jobs today: the Thursday-20:00 weekly nudge, and the daily
+ * incremental order-history sync. Both run inside the bot's own process.
  */
 
 export {
@@ -14,3 +13,11 @@ export {
   type WeeklyNudgeOptions,
 } from './cron.js';
 export { buildWeeklyNudge, formatRelativeDays } from './nudge.js';
+export {
+  startOrderSync,
+  fireOrderSync,
+  ORDER_SYNC_PATTERN,
+  ORDER_SYNC_TIMEZONE,
+  type OrderSyncOptions,
+  type OrderSyncHandle,
+} from './order-sync.js';
