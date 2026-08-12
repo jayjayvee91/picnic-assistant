@@ -28,7 +28,12 @@ import {
   DailySpendCapExceededError,
   IterationCapExceededError,
 } from '../agent/index.js';
-import { getTodayApiSpend, type DB } from '../memory/index.js';
+import {
+  getTodayApiSpend,
+  getRecentAllergenDecisions,
+  listAllergenOverrides,
+  type DB,
+} from '../memory/index.js';
 
 import {
   getAllowedChatId,
@@ -183,6 +188,55 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
     const reply = await handleSmsCommand(opts.picnic, chatState);
     await ctx.reply(reply);
   });
+
+  // /gluten-log — the human-facing window into how the guard decided. Telegram
+  // command names cannot contain a hyphen, so the canonical name is
+  // /glutenlog with /gluten_log accepted as an alias.
+  const glutenLog = async (ctx: Context): Promise<void> => {
+    const decisions = getRecentAllergenDecisions(opts.db, 15);
+    const overrides = listAllergenOverrides(opts.db, 20);
+
+    if (decisions.length === 0 && overrides.length === 0) {
+      await ctx.reply(
+        'Nog geen glutencontroles uitgevoerd. Zodra de assistent producten ' +
+          'toevoegt, verschijnt hier per product wat er is besloten en waarom.',
+      );
+      return;
+    }
+
+    const lines: string[] = ['Laatste glutencontroles (nieuwste eerst):', ''];
+    for (const d of decisions) {
+      const mark = d.verdict === 'blocked' ? '✖' : d.verdict === 'unverified' ? '?' : '✓';
+      const name = d.articleName ?? d.articleId;
+      lines.push(`${mark} ${name} — ${d.verdict} (${d.decidedBy})`);
+      lines.push(`   ${d.reason}`);
+      if (d.matchedTerms.length > 0) {
+        lines.push(`   regels die aansloegen: ${d.matchedTerms.join(', ')}`);
+      }
+      if (d.allergens && d.allergens.length > 0) {
+        lines.push(`   allergenen volgens Picnic: ${d.allergens.join(', ')}`);
+      }
+      lines.push(`   ${d.createdAt}`);
+      lines.push('');
+    }
+
+    if (overrides.length > 0) {
+      lines.push('Handmatige uitzonderingen en correcties:');
+      for (const o of overrides) {
+        const scope = o.scope === 'once' ? 'eenmalig' : 'blijvend';
+        lines.push(
+          `- ${o.articleName ?? o.articleId}: altijd ${o.verdict} (${scope}) — ${o.reason}`,
+        );
+      }
+      lines.push('');
+    }
+
+    lines.push('De regels zelf staan in gluten-rules.md; die kun je zelf aanpassen.');
+    await sendChunked(ctx, lines.join('\n'));
+  };
+
+  bot.command('glutenlog', glutenLog);
+  bot.command('gluten_log', glutenLog);
 
   // Manually fire the weekly nudge without waiting for Thursday 20:00. The
   // cron firing path is identical to this one, so testing here is a fair

@@ -61,11 +61,81 @@ re-promote from `develop`.
 ```
 src/
 ├── agent/       Claude agent loop, tool definitions, prompt assembly
+├── allergen/    Gluten guard: rulebook, decision engine, audit log
+├── recipe/      Recipe sources (Picnic favourites today), parsers, registry
 ├── memory/      SQLite store, household profile, purchase summary
 ├── picnic/      Picnic API adapter (decided in Step 2: MRVDH direct or mcp-picnic sidecar)
 ├── scheduler/   Weekly Thursday 20:00 nudge
 └── telegram/    Telegram bot, group chat restriction, /sms /stop /start /status commands
 ```
+
+## Recipes
+
+The assistant plans meals from the household's **saved Picnic recipes**, not
+from invention. `list_recipes` returns the real saved library;
+`add_recipe_to_draft` turns a chosen recipe into draft items.
+
+Picnic hands back a **specific article id per ingredient**, so a recipe resolves
+to real products with no name-guessing — which is what lets the gluten guard and
+brand preferences act exactly rather than approximately.
+
+**Only the pre-selected ingredients are added.** Picnic also lists optional
+pantry extras (oil, cheese, stock) that it leaves unticked. One real recipe:
+15 ingredients at €48.33, of which the 6 pre-selected ones cost €11.80 — adding
+everything would roughly quadruple a week's bill. Pass `includeExtras` to opt in.
+
+Sources live behind a registry, so a personal recipe database can be added later
+without changing the agent tools or the prompt.
+
+```bash
+npm run smoke:recipe    # parser checks against fixtures, offline
+npm run verify:recipe   # parse real captured data; --live to fetch fresh
+```
+
+Two upstream notes worth knowing: `picnic-api`'s `getRecipeDetailsPage()` is
+broken (it requests a page id Picnic has retired), and the meals landing page
+only carries preview carousels capped at ~12–20 recipes. Both are worked around
+in `src/picnic/client.ts`, with the reasons documented there.
+
+## Gluten guard (coeliac safety)
+
+Someone in the household has coeliac disease, so **no product containing gluten
+— or possible traces — may reach the cart.** This is enforced in code, not by
+asking the model to remember: `src/allergen/guard.ts` checks every article on
+every path into the draft or the cart (`add_to_draft`, `add_to_cart_now`,
+`commit_draft_to_cart`). The model cannot skip it.
+
+**Three verdicts.** `blocked` never enters the cart. `allowed` is positively
+verified. `unverified` means the data was missing or unclear — the item is still
+added (the household's chosen policy) but flagged by name, never silently.
+Anything unknown fails toward caution: a failed fetch, an upstream parser break,
+or an empty allergen list all yield `unverified`, never `allowed`.
+
+**It is not a black box.** Every term that can block a product lives in
+`DATA_DIR/gluten-rules.md`, which you edit directly — sections `Bevat gluten`
+(blocks), `Twijfel` (flags), `Veilig` (prevents false matches), and
+`Voorbeelden` (your own notes). Every decision is recorded with the raw allergen
+and ingredient data it saw; read it back with `/glutenlog` in Telegram.
+
+**Teaching it.** If a verdict was wrong, tell the bot in chat — it proposes a
+rulebook line and appends it only after you approve (same discipline as profile
+edits). Product-specific mistakes use an override instead, so a one-off
+mislabelling doesn't become a general rule.
+
+**Ordering gluten on purpose** (e.g. bread for a housemate who isn't coeliac)
+is possible: acknowledge the gluten explicitly and the bot routes it through a
+dedicated exception path, either once or standing. It is logged, labelled in the
+cart, and the model can never take that route on its own initiative.
+
+```bash
+# Verify the guard offline — no Picnic session or API key needed
+npm run smoke:allergen
+```
+
+The check depends on Picnic's product-detail data, whose upstream parser is
+marked experimental. `npm run smoke:picnic` probes it against a real product so
+a layout change upstream surfaces loudly rather than silently degrading every
+product to `unverified`.
 
 ## Privacy
 

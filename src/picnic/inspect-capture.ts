@@ -1,0 +1,643 @@
+/**
+ * Offline inspector for a captured Fusion page.
+ *
+ * Run with:
+ *   npm run capture:inspect
+ *
+ * Why this exists
+ * ---------------
+ * `capture:recipes` dumps the recipes overview verbatim, and that dump is
+ * ~16 MB of nested UI description — far too large to move around or read by
+ * hand. Almost all of it is layout noise; the parts that matter for Phase 2
+ * are a few hundred bytes: where the saved/"Bewaard" recipes live, what a
+ * recipe tile looks like, and which field holds the real recipe id.
+ *
+ * So rather than shipping the file somewhere to be analysed, this analyses it
+ * in place and emits two small artefacts:
+ *
+ *   - a compact report on stdout (and `inspect-report.txt`), short enough to
+ *     paste into a chat
+ *   - `favourites-slice.json`, a bounded extract of the interesting subtrees
+ *
+ * No network, no Picnic session, no credentials. It only reads the file that
+ * `capture:recipes` already wrote.
+ */
+
+import 'dotenv/config';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+/** Wording that marks the saved/favourite recipes area in the Dutch app. */
+const SAVED_HINT = /bewaard|favoriet|opgeslagen/i;
+
+/** How much of a matched subtree to keep in the slice file. */
+const SLICE_DEPTH = 6;
+const SLICE_ARRAY = 3;
+const SLICE_STRING = 300;
+
+interface Found {
+  path: string;
+  node: unknown;
+}
+
+async function main(): Promise<void> {
+  const dataDir = process.env['DATA_DIR'] ?? './data';
+  const outDir = join(dataDir, 'capture');
+  // Any captured file can be inspected, not just the big overview — the probe
+  // responses are Fusion pages too, and much smaller.
+  const fileName =
+    process.argv.find((a) => a.startsWith('--file='))?.slice('--file='.length) ??
+    'recipes-page.json';
+  const pagePath = join(outDir, fileName);
+
+  let page: unknown;
+  try {
+    const raw = await readFile(pagePath, 'utf8');
+    console.log(`Read ${pagePath} (${(raw.length / 1024 / 1024).toFixed(1)} MB)`);
+    page = JSON.parse(raw);
+  } catch (err) {
+    console.error(`Could not read ${pagePath}.`);
+    console.error('Run `npm run capture:recipes` first.');
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const report: string[] = [];
+  const say = (line = ''): void => {
+    console.log(line);
+    report.push(line);
+  };
+
+  say();
+  say('==================== INSPECTION REPORT ====================');
+  say();
+
+  // ── 1. Component vocabulary ─────────────────────────────────────────
+  // Which PML component types exist, and how often. Tells us what we are
+  // dealing with before looking at anything specific.
+  const typeCounts = new Map<string, number>();
+  const idPatterns = new Map<string, number>();
+  forEachObject(page, (obj) => {
+    const t = obj['type'];
+    if (typeof t === 'string') typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
+    const id = obj['id'];
+    if (typeof id === 'string' && /[a-z]/i.test(id) && id.length < 60) {
+      // Generalise "meal-segment-control-item-Bewaard" → "meal-segment-control-item-*"
+      const generalised = id.replace(/[0-9a-f]{24}/gi, '<hex24>').replace(/\d+/g, '<n>');
+      idPatterns.set(generalised, (idPatterns.get(generalised) ?? 0) + 1);
+    }
+  });
+
+  say('--- Component types (top 25) ---');
+  for (const [t, n] of topN(typeCounts, 25)) say(`  ${n.toString().padStart(5)}  ${t}`);
+  say();
+
+  say('--- Named component ids mentioning recipes/meals/saved (top 30) ---');
+  const interestingIds = [...idPatterns.entries()].filter(([id]) =>
+    /recipe|meal|cookbook|saved|bewaar|favorit/i.test(id),
+  );
+  for (const [id, n] of topN(new Map(interestingIds), 30)) {
+    say(`  ${n.toString().padStart(5)}  ${id}`);
+  }
+  if (interestingIds.length === 0) say('  (none)');
+  say();
+
+  // ── 2. Where the saved/favourites wording appears ───────────────────
+  const savedHits: Found[] = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (typeof node === 'string' && SAVED_HINT.test(node) && node.length < 120) {
+      savedHits.push({ path, node });
+    }
+  });
+
+  say('--- Where "Bewaard"/"Favorieten" appears (first 25) ---');
+  for (const hit of savedHits.slice(0, 25)) {
+    say(`  ${JSON.stringify(hit.node)}`);
+    say(`      at ${hit.path}`);
+  }
+  say(`  (${savedHits.length} total)`);
+  say();
+
+  // ── 3. Recipe-id provenance ─────────────────────────────────────────
+  // The previous run collected 93 candidate ids and every detail fetch failed,
+  // so the question is not "what ids exist" but "which field actually holds a
+  // recipe id". Grouping by the containing key answers that.
+  const idsByKey = new Map<string, Set<string>>();
+  forEachObject(page, (obj) => {
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value !== 'string') continue;
+      if (!/^[0-9a-f]{24}$/i.test(value)) continue;
+      const parentType = typeof obj['type'] === 'string' ? obj['type'] : '?';
+      const bucket = `${key}  (on type=${parentType})`;
+      let set = idsByKey.get(bucket);
+      if (!set) {
+        set = new Set();
+        idsByKey.set(bucket, set);
+      }
+      set.add(value);
+    }
+  });
+
+  say('--- Where 24-hex ids live (key, and the component type carrying it) ---');
+  const sorted = [...idsByKey.entries()].sort((a, b) => b[1].size - a[1].size);
+  for (const [bucket, set] of sorted.slice(0, 30)) {
+    say(`  ${set.size.toString().padStart(4)}  ${bucket}`);
+    say(`        e.g. ${[...set].slice(0, 3).join(', ')}`);
+  }
+  say();
+
+  // ── 4. Anything that looks like a navigation target ─────────────────
+  // Deep links name a recipe definitively — this is the most reliable route
+  // to a real recipe id.
+  const links = new Set<string>();
+  forEachNodeWithPath(page, (node) => {
+    if (typeof node !== 'string') return;
+    if (node.length > 400) return;
+    if (/recipe|meal/i.test(node) && /[?&/]/.test(node) && !/\s/.test(node)) links.add(node);
+  });
+  say('--- Link-ish strings mentioning recipe/meal (first 25) ---');
+  for (const l of [...links].slice(0, 25)) say(`  ${l}`);
+  if (links.size === 0) say('  (none)');
+  say();
+
+  // ── 5. Sample tiles ─────────────────────────────────────────────────
+  // A recipe tile should carry an id plus a human-readable name. Printing two
+  // real ones shows the exact field layout the parser must read.
+  const tiles: Found[] = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    const obj = node as Record<string, unknown>;
+    const hasId = Object.entries(obj).some(
+      ([, v]) => typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v),
+    );
+    const hasName = ['name', 'title', 'text', 'label'].some((k) => typeof obj[k] === 'string');
+    if (hasId && hasName) tiles.push({ path, node });
+  });
+
+  say('--- Sample nodes carrying BOTH a 24-hex id and a name (first 3) ---');
+  for (const tile of tiles.slice(0, 3)) {
+    say(`  at ${tile.path}`);
+    say(indent(JSON.stringify(prune(tile.node, 3, 2, 120), null, 2), 4));
+    say();
+  }
+  if (tiles.length === 0) say('  (none found)');
+  say(`  (${tiles.length} such nodes in total)`);
+  say();
+
+  // ── 6. The recipe catalogue, straight from the app's own deep links ──
+  // The tiles hide their names behind PML expression variables, but the
+  // navigation targets spell everything out:
+  //   …id=<recipeId>&image=<path>&name=<name>&source=SELLING_GROUP_TILE
+  // That is a complete id→name mapping without touching the template layer.
+  const catalogue = new Map<string, { id: string; name: string; image?: string }>();
+  for (const link of links) {
+    const id = /[?&,]id=([0-9a-f]{24})/i.exec(link)?.[1];
+    if (!id) continue;
+    const rawName = /[?&]name=([^&]+)/.exec(link)?.[1];
+    const rawImage = /[?&]image=([^&]+)/.exec(link)?.[1];
+    if (!rawName) continue;
+    catalogue.set(id, {
+      id,
+      name: safeDecode(rawName),
+      ...(rawImage ? { image: safeDecode(rawImage) } : {}),
+    });
+  }
+
+  say('--- Recipes recovered from deep links (first 20) ---');
+  for (const r of [...catalogue.values()].slice(0, 20)) say(`  ${r.id}  ${r.name}`);
+  say(`  (${catalogue.size} recipes with names in total)`);
+  say();
+
+  // ── 6b. Page-id vocabulary ──────────────────────────────────────────
+  // Fusion pages are addressed by a registry id, and a wrong id gets you
+  // "page with id 'x' was not found" — which is exactly how the documented
+  // recipe-details page failed. The app's own deep links (app.picnic://store/
+  // page;id=<pageId>) enumerate the ids that genuinely exist, so this is the
+  // authoritative list of what we may request.
+  const pageIds = new Map<string, number>();
+  forEachNodeWithPath(page, (node) => {
+    if (typeof node !== 'string') return;
+    for (const m of node.matchAll(/store\/page;id=([A-Za-z0-9._-]+)/g)) {
+      const pid = m[1];
+      if (pid) pageIds.set(pid, (pageIds.get(pid) ?? 0) + 1);
+    }
+  });
+  say('--- Fusion page ids referenced by the app (these are known to exist) ---');
+  for (const [pid, n] of topN(pageIds, 40)) say(`  ${n.toString().padStart(5)}  ${pid}`);
+  if (pageIds.size === 0) say('  (none found)');
+  say();
+
+  // ── 6c. Navigation actions ──────────────────────────────────────────
+  // Buttons carry the next page to open. On a bottom sheet, one of these is
+  // the route to the full recipe.
+  const actions: string[] = [];
+  forEachObject(page, (obj) => {
+    const id = typeof obj['id'] === 'string' ? obj['id'] : '';
+    const pageId = obj['page_id'] ?? obj['pageId'];
+    if (typeof pageId === 'string') {
+      actions.push(`page_id=${pageId}${id ? `  (on id=${id})` : ''}`);
+    }
+  });
+  if (actions.length > 0) {
+    say('--- Explicit page_id navigation targets ---');
+    for (const a of unique(actions).slice(0, 30)) say(`  ${a}`);
+    say();
+  }
+
+  // ── 6c2. Deferred content pages ─────────────────────────────────────
+  // Fusion pages routinely return a shell whose real content is loaded by a
+  // second request: a SUSPENSE node (or an onMount RELOAD) carries a
+  // `pageConfig` naming the page id to fetch and the parameters to pass.
+  //
+  // This is why two "successful" probes looked empty. `action-bottom-sheet`
+  // deferred to `action-bottom-sheet-content`, and `saved-deep-dive-page` —
+  // whose header title is literally "Bewaard" — defers to
+  // `saved-deep-dive-page-content`. The shell is never where the data is.
+  //
+  // Reporting these turns "the page came back empty" into "here is the exact
+  // follow-up request to make".
+  const deferred: string[] = [];
+  forEachObject(page, (obj) => {
+    const cfg = obj['pageConfig'];
+    if (!cfg || typeof cfg !== 'object') return;
+    const cfgObj = cfg as Record<string, unknown>;
+    const pid = cfgObj['id'];
+    if (typeof pid !== 'string') return;
+    const params = cfgObj['parameters'];
+    // Parameter values are truncated: pages carry a `feature_flags` blob of
+    // several hundred entries that buries everything else in the report.
+    const paramDesc =
+      params && typeof params === 'object'
+        ? Object.entries(params as Record<string, unknown>)
+            .map(([k, v]) => `${k}=${truncate(v === null ? 'null' : JSON.stringify(v), 120)}`)
+            .join(', ')
+        : '(no parameters)';
+    deferred.push(`${pid}  ?  ${paramDesc}`);
+  });
+  say('--- Deferred content pages (fetch these next) ---');
+  if (deferred.length === 0) say('  (none)');
+  for (const d of unique(deferred).slice(0, 20)) say(`  ${d}`);
+  say();
+
+  // ── 6c3. Ingredient + article structures ────────────────────────────
+  // On a recipe detail page this is the payload that matters: which
+  // ingredients the recipe needs, and — critically — which Picnic articles
+  // they map to, since the gluten guard and the brand-preference logic both
+  // work on article ids.
+  //
+  // Objects are grouped by their key SHAPE rather than listed individually,
+  // because a detail page repeats the same node type once per ingredient;
+  // seeing the shape once, with a count, is what a parser needs.
+  const shapeSamples = new Map<string, { count: number; sample: unknown; path: string }>();
+  forEachNodeWithPath(page, (node, path) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    const obj = node as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 0 || keys.length > 25) return;
+    const relevant = keys.some((k) =>
+      /ingredient|article|selling_unit|sole_article|portion|quantity|amount|unit/i.test(k),
+    );
+    if (!relevant) return;
+    const shape = keys.sort().join(',');
+    const existing = shapeSamples.get(shape);
+    if (existing) existing.count++;
+    else shapeSamples.set(shape, { count: 1, sample: node, path });
+  });
+
+  say('--- Ingredient / article node shapes (most frequent first) ---');
+  const shapes = [...shapeSamples.entries()].sort((a, b) => b[1].count - a[1].count);
+  if (shapes.length === 0) say('  (none)');
+  for (const [shape, info] of shapes.slice(0, 8)) {
+    say(`  ×${info.count}  {${truncate(shape, 160)}}`);
+    say(`       at ${truncate(info.path, 130)}`);
+    say(indent(JSON.stringify(prune(info.sample, 4, 3, 120), null, 2), 8));
+    say();
+  }
+
+  // ── 6d. Every array of recipe ids, largest first ────────────────────
+  // This is the "am I seeing all of them?" check, and it is deliberately
+  // exhaustive rather than targeted.
+  //
+  // An earlier pass reported a "Bewaard" pill listing 12 recipes and treated
+  // that as the household's saved set. It is not: that pill belongs to ONE
+  // campaign section of the meals page, so its 12 ids are what that carousel
+  // previews, not everything the household has saved. Reading a section
+  // preview as the complete list is exactly the mistake this section exists to
+  // prevent — so instead of trusting one well-known field, enumerate every id
+  // array in the payload and let the sizes speak.
+  //
+  // If the true saved list is present at all, it shows up here as a large
+  // array. If the largest array is still far short of what the app displays,
+  // that is positive evidence the full list is NOT in this payload and must be
+  // fetched from a dedicated page.
+  const idArrays: Array<{ path: string; ids: string[]; label: string }> = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (!Array.isArray(node) || node.length === 0) return;
+    const ids = node.filter((v): v is string => typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v));
+    // Require the array to be mostly ids, so we skip mixed content arrays.
+    if (ids.length < 2 || ids.length < node.length * 0.8) return;
+    idArrays.push({ path, ids, label: labelForPath(path) });
+  });
+  idArrays.sort((a, b) => b.ids.length - a.ids.length);
+
+  say('--- Every array of recipe ids, largest first (top 15) ---');
+  if (idArrays.length === 0) say('  (none found)');
+  for (const arr of idArrays.slice(0, 15)) {
+    say(`  ${arr.ids.length.toString().padStart(4)} ids  ${arr.label}`);
+    say(`         at ${truncate(arr.path, 150)}`);
+  }
+  const biggest = idArrays[0];
+  say();
+  say(
+    `  Largest id array in this payload: ${biggest ? biggest.ids.length : 0}. ` +
+      'If the app shows more saved recipes than that, the full list is NOT in ' +
+      'this page and needs its own request (see saved-deep-dive-page / ' +
+      'my-recipes-page-root).',
+  );
+  say();
+
+  // Distinct ids across the WHOLE payload, as an upper bound on what this
+  // single page could possibly know about.
+  const allIds = new Set<string>();
+  forEachNodeWithPath(page, (node) => {
+    if (typeof node === 'string' && /^[0-9a-f]{24}$/i.test(node)) allIds.add(node);
+  });
+  say(`  Distinct 24-hex ids anywhere in this payload: ${allIds.size}`);
+  say(`  Recipes with a name recovered from deep links: ${catalogue.size}`);
+  say();
+
+  // ── 6e. Named segment pills ─────────────────────────────────────────
+  // Reported per occurrence, NOT deduplicated by name: a pill name can appear
+  // in several sections, and collapsing them would hide the fact that each
+  // carries a different, partial set.
+  const pillRanges: Array<{ pill: string; count: number; ids: string[]; path: string }> = [];
+  forEachNodeWithPath(page, (node, path) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+    const obj = node as Record<string, unknown>;
+    const ep2 = obj['__ep2'];
+    if (!ep2 || typeof ep2 !== 'object') return;
+    const inner = ep2 as Record<string, unknown>;
+    const ids = inner['v4'];
+    if (!Array.isArray(ids)) return;
+    const onlyIds = ids.filter(
+      (v): v is string => typeof v === 'string' && /^[0-9a-f]{24}$/i.test(v),
+    );
+    if (onlyIds.length === 0) return;
+    const pill = typeof obj['v13'] === 'string' ? obj['v13'] : '(unnamed pill)';
+    // v5 is the count the app reports for the pill; when it exceeds the ids
+    // actually embedded, the payload is holding a preview, not the full set.
+    const count = typeof inner['v5'] === 'number' ? inner['v5'] : onlyIds.length;
+    pillRanges.push({ pill, count, ids: onlyIds, path });
+  });
+
+  say('--- Segment pills and the recipe ids they carry (every occurrence) ---');
+  if (pillRanges.length === 0) say('  (none found)');
+  for (const r of pillRanges.slice(0, 20)) {
+    const partial = r.count > r.ids.length ? '  ← PARTIAL: reports more than it embeds' : '';
+    say(`  "${r.pill}" — reports ${r.count}, embeds ${r.ids.length} ids${partial}`);
+    say(`       at ${truncate(r.path, 140)}`);
+  }
+  say(`  (${pillRanges.length} pill occurrences in total)`);
+  say();
+
+  const bestPerPill = new Map<string, { pill: string; count: number; ids: string[] }>();
+  for (const r of pillRanges) {
+    const existing = bestPerPill.get(r.pill);
+    if (!existing || r.ids.length > existing.ids.length) {
+      bestPerPill.set(r.pill, { pill: r.pill, count: r.count, ids: r.ids });
+    }
+  }
+  // Union across every occurrence of a pill name — a name split over several
+  // sections may cover more between them than any single occurrence does.
+  const unionPerPill = new Map<string, Set<string>>();
+  for (const r of pillRanges) {
+    let set = unionPerPill.get(r.pill);
+    if (!set) {
+      set = new Set();
+      unionPerPill.set(r.pill, set);
+    }
+    for (const id of r.ids) set.add(id);
+  }
+  say('--- Union of ids per pill name (across all its occurrences) ---');
+  for (const [pill, set] of unionPerPill) say(`  "${pill}": ${set.size} distinct ids`);
+  say();
+
+  // ── 7. Optional: dump one subtree by path ───────────────────────────
+  // Pass --path=$.layout.body.… to see a specific node in full. Used to read
+  // the "Bewaard" pill's onPress handler, which is what reveals the request
+  // the app makes when that tab is tapped.
+  const wantPath = process.argv.find((a) => a.startsWith('--path='))?.slice('--path='.length);
+  if (wantPath) {
+    say(`--- Subtree at ${wantPath} ---`);
+    const node = resolvePath(page, wantPath);
+    if (node === undefined) {
+      say('  (path did not resolve)');
+    } else {
+      say(indent(JSON.stringify(prune(node, 8, 4, 300), null, 2), 4));
+    }
+    say();
+  }
+
+  // ── 7b. Optional: dump the whole (pruned) document ──────────────────
+  // Practical for the small probe responses; the 16 MB overview would be
+  // unreadable, so this is opt-in.
+  if (process.argv.includes('--dump')) {
+    say('--- Full pruned document ---');
+    say(indent(JSON.stringify(prune(page, 12, 6, 200), null, 2), 2));
+    say();
+  }
+
+  say('==================== END REPORT ====================');
+
+  // ── 6. Write the bounded slice for deeper analysis ──────────────────
+  const slice = {
+    note: 'Bounded extract of a Picnic recipes Fusion page. Arrays and depth are truncated.',
+    savedWordingPaths: savedHits.slice(0, 40).map((h) => ({ path: h.path, text: h.node })),
+    sampleTiles: tiles.slice(0, 10).map((t) => ({
+      path: t.path,
+      node: prune(t.node, SLICE_DEPTH, SLICE_ARRAY, SLICE_STRING),
+    })),
+    links: [...links].slice(0, 60),
+    idBuckets: sorted.slice(0, 40).map(([bucket, set]) => ({
+      bucket,
+      count: set.size,
+      samples: [...set].slice(0, 5),
+    })),
+    typeCounts: Object.fromEntries(topN(typeCounts, 60)),
+  };
+
+  // Suffix outputs by input file so inspecting a probe response does not
+  // overwrite the overview's report.
+  const stem = fileName.replace(/\.json$/i, '');
+  const suffix = stem === 'recipes-page' ? '' : `-${stem}`;
+  const slicePath = join(outDir, `favourites-slice${suffix}.json`);
+  const cataloguePath = join(outDir, `recipes-catalogue${suffix}.json`);
+  const reportPath = join(outDir, `inspect-report${suffix}.txt`);
+
+  await writeFile(slicePath, JSON.stringify(slice, null, 2), { mode: 0o600 });
+  await writeFile(cataloguePath, JSON.stringify([...catalogue.values()], null, 2), { mode: 0o600 });
+  await writeFile(reportPath, report.join('\n'), { mode: 0o600 });
+
+  if (bestPerPill.size > 0) {
+    const pillsPath = join(outDir, `pill-recipe-ids${suffix}.json`);
+    await writeFile(
+      pillsPath,
+      JSON.stringify(
+        [...bestPerPill.values()].map((r) => ({
+          pill: r.pill,
+          count: r.count,
+          recipes: r.ids.map((id) => ({ id, name: catalogue.get(id)?.name ?? null })),
+        })),
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    console.log(`Wrote ${pillsPath}`);
+  }
+
+  console.log();
+  console.log(`Wrote ${slicePath}`);
+  console.log(`Wrote ${cataloguePath}  (${catalogue.size} recipes)`);
+  console.log(`Wrote ${reportPath}`);
+  console.log();
+  console.log('All small. Send the report (or paste it) to continue.');
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Traversal helpers
+// ──────────────────────────────────────────────────────────────────────
+
+const MAX_DEPTH = 60;
+
+/** Visit every plain object in the tree. */
+function forEachObject(
+  value: unknown,
+  fn: (obj: Record<string, unknown>) => void,
+  depth = 0,
+): void {
+  if (depth > MAX_DEPTH || !value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) forEachObject(item, fn, depth + 1);
+    return;
+  }
+  fn(value as Record<string, unknown>);
+  for (const v of Object.values(value)) forEachObject(v, fn, depth + 1);
+}
+
+/**
+ * Visit every node with a dotted path. Paths are what make the report
+ * actionable — "this string lives at layout.body.children[3].header" tells us
+ * where to point the parser.
+ */
+function forEachNodeWithPath(
+  value: unknown,
+  fn: (node: unknown, path: string) => void,
+  path = '$',
+  depth = 0,
+): void {
+  if (depth > MAX_DEPTH) return;
+  fn(value, path);
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    // Descend into EVERY entry. An earlier version stopped at 40 on the theory
+    // that layout arrays repeat the same shape — but that assumption is fatal
+    // to the question "have I found all the saved recipes?", since a long list
+    // could sit past the cutoff and simply never be visited. Walking a 16 MB
+    // tree in full costs a couple of seconds; a silent blind spot costs a
+    // wrong answer.
+    for (let i = 0; i < value.length; i++) {
+      forEachNodeWithPath(value[i], fn, `${path}[${i}]`, depth + 1);
+    }
+    return;
+  }
+  for (const [k, v] of Object.entries(value)) {
+    forEachNodeWithPath(v, fn, `${path}.${k}`, depth + 1);
+  }
+}
+
+/** Depth/width/length-limited copy, so a sample stays readable. */
+function prune(value: unknown, depth: number, maxArray: number, maxString: number): unknown {
+  if (depth <= 0) return '…';
+  if (typeof value === 'string') {
+    return value.length > maxString ? `${value.slice(0, maxString)}…` : value;
+  }
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, maxArray).map((v) => prune(v, depth - 1, maxArray, maxString));
+    if (value.length > maxArray) kept.push(`…${value.length - maxArray} more`);
+    return kept;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = prune(v, depth - 1, maxArray, maxString);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Percent-decode without throwing on malformed input. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Resolve one of the dotted paths this report prints, e.g.
+ * `$.layout.body.child.children[0].id`. Only supports the syntax we emit.
+ */
+function resolvePath(root: unknown, path: string): unknown {
+  const cleaned = path.replace(/^\$\.?/, '');
+  if (cleaned.length === 0) return root;
+  let current: unknown = root;
+  for (const segment of cleaned.split('.')) {
+    const match = /^([^[]*)((\[\d+\])*)$/.exec(segment);
+    if (!match) return undefined;
+    const key = match[1] ?? '';
+    if (key.length > 0) {
+      if (!current || typeof current !== 'object') return undefined;
+      current = (current as Record<string, unknown>)[key];
+    }
+    for (const idx of (match[2] ?? '').matchAll(/\[(\d+)\]/g)) {
+      if (!Array.isArray(current)) return undefined;
+      current = current[Number(idx[1])];
+    }
+  }
+  return current;
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
+}
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/** Short human label for a deep path: the last few meaningful segments. */
+function labelForPath(path: string): string {
+  const segments = path.split('.').filter((s) => s.length > 0 && s !== '$');
+  return segments.slice(-3).join('.') || path;
+}
+
+function topN(counts: Map<string, number>, n: number): Array<[string, number]> {
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
+}
+
+function indent(text: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return text
+    .split('\n')
+    .map((l) => pad + l)
+    .join('\n');
+}
+
+main().catch((err) => {
+  console.error('Inspection failed:');
+  console.error(err instanceof Error ? `${err.name}: ${err.message}` : err);
+  process.exit(1);
+});

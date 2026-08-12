@@ -12,9 +12,17 @@
  *
  * Sections
  * --------
- * `## Preferences`, `## Dislikes`, `## Brands`, `## Patterns`. Append-only via
- * the bot; you can edit freely by hand. The bot never silently rewrites — it
- * proposes a line, you approve, then this module appends it.
+ * `## Allergies`, `## Preferences`, `## Dislikes`, `## Brands`, `## Patterns`.
+ * Append-only via the bot; you can edit freely by hand. The bot never silently
+ * rewrites — it proposes a line, you approve, then this module appends it.
+ *
+ * `## Allergies` is different in kind from the others: it states household
+ * medical constraints (e.g. coeliac disease). It is the source of truth for
+ * WHAT must be avoided, but it is NOT the enforcement mechanism — a line in a
+ * prompt is a request, not a guarantee. Enforcement lives in
+ * `src/allergen/guard.ts`, which blocks unsafe products in code on every path
+ * into the cart. Editing this section changes what the assistant *says*; it
+ * does not by itself change what the guard *blocks*.
  *
  * Concurrent edits
  * ----------------
@@ -29,9 +37,15 @@ import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Section headers we know how to target programmatically. */
-export type ProfileSection = 'Preferences' | 'Dislikes' | 'Brands' | 'Patterns';
+export type ProfileSection = 'Allergies' | 'Preferences' | 'Dislikes' | 'Brands' | 'Patterns';
 
-const KNOWN_SECTIONS: ProfileSection[] = ['Preferences', 'Dislikes', 'Brands', 'Patterns'];
+const KNOWN_SECTIONS: ProfileSection[] = [
+  'Allergies',
+  'Preferences',
+  'Dislikes',
+  'Brands',
+  'Patterns',
+];
 
 /**
  * Read the profile file fresh from disk. Returns the entire Markdown content.
@@ -154,6 +168,32 @@ export function isKnownSection(value: string): value is ProfileSection {
 }
 
 /**
+ * Ensure a named section exists in an ALREADY-SEEDED profile, seeding it with
+ * `placeholder` if absent. Returns true if the section was added.
+ *
+ * Why this exists: `ensureProfileSeeded` only writes the template when there is
+ * no profile at all. A household that has been running since before a section
+ * was introduced would never get it. That is harmless for taste-based sections
+ * but not for `## Allergies` — we want the medical constraint visible in the
+ * prompt from the first turn after upgrade, not only after the first write.
+ *
+ * Idempotent: a no-op when the heading is already present (even if the user
+ * has since rewritten its body).
+ */
+export async function ensureProfileSection(
+  profilePath: string,
+  section: ProfileSection,
+  placeholder: string,
+): Promise<boolean> {
+  const current = await loadProfile(profilePath);
+  if (current.split('\n').some((line) => line.trim() === `## ${section}`)) {
+    return false;
+  }
+  await atomicWriteProfile(profilePath, insertBulletUnderSection(current, section, placeholder));
+  return true;
+}
+
+/**
  * Inlined seed template. Inlined (rather than read from a sibling `.md` file)
  * so the production build doesn't need extra steps to copy non-`.ts` assets
  * into `dist/`. The template kept here mirrors `profile.template.md` for
@@ -164,6 +204,14 @@ const PROFILE_TEMPLATE = `# Huishoudprofiel
 Dit document beschrijft jullie voorkeuren. De assistent leest het bij elk gesprek
 en past suggesties hierop aan. Je kunt het zelf direct aanpassen — wijzigingen
 worden bij het volgende bericht meegenomen.
+
+## Allergies
+
+- Coeliakie in het huishouden: NOOIT producten bestellen die gluten bevatten of
+  waar sporen van gluten in kunnen zitten.
+- (Deze sectie beschrijft WAT vermeden moet worden. De harde controle zit in de
+  code — zie \`gluten-rules.md\` voor de regels die de assistent toepast en hoe je
+  die zelf aanvult.)
 
 ## Preferences
 

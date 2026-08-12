@@ -15,6 +15,7 @@ export type {
   GetDeliverySlotsResult,
   PicnicClientOptions,
   PicnicCountryCode,
+  ProductDetails,
   SellingUnit,
 } from './client.js';
 export { AuthRequiredError, PicnicCallError, TwoFactorRequiredError } from './errors.js';

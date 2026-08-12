@@ -151,6 +151,67 @@ Baseline VPS hardening (Step 9) applies to all three.
 🟥 Walk through `/sms` re-auth flow at least once
 🟥 Walk through `/stop` + `/start` + `/status` from phone at least once
 
+### Step 11 — Gluten guard (coeliac safety) ✅ SAFETY-CRITICAL
+**Why:** household members were diagnosed with coeliac disease. Nothing containing gluten *or traces* may be ordered. Treated as a cross-cutting guard rather than a recipe feature, because it must protect every route into the cart.
+
+🟩 `PicnicClient.getProductDetails` — the only route to allergen + ingredient data (`searchProducts` returns none). Upstream parser is marked experimental, so the guard fails safe on a throw; `smoke:picnic` probes it so a PDP layout change surfaces loudly.
+🟩 `## Allergies` profile section + `ensureProfileSection` so pre-existing profiles gain it on upgrade. The profile states WHAT to avoid; it is explicitly *not* the enforcement.
+🟩 `src/allergen/rulebook.ts`: `gluten-rules.md`, human-editable, sections `Bevat gluten` (blocks) / `Twijfel` (flags unverified) / `Veilig` (suppresses false matches) / `Voorbeelden` (notes). Word-start matching handles Dutch compounds ("tarwe" → "tarwebloem"); diacritic-insensitive. Ships a usable starter list rather than an empty file.
+🟩 `src/allergen/guard.ts`: pure layered engine — override → Picnic's declared allergens → rulebook vs. ingredient text → conclusion. Three verdicts: `blocked` / `allowed` / `unverified`.
+🟩 **Fail-safe throughout:** failed fetch, broken upstream parser, or empty allergen list ⇒ `unverified`, never `allowed`. An empty allergen list is ambiguous ("no allergens" vs "no data") so it never counts as proof of safety. `AuthRequiredError` propagates instead of degrading into a warning.
+🟩 `allergen_decisions` audit table records every verdict with the raw inputs it saw; `product_allergen_overrides` holds human corrections and deliberate exceptions.
+🟩 Guard wired into `add_to_draft`, `add_to_cart_now`, **and re-run at `commit_draft_to_cart`** so a rule added mid-conversation retroactively protects items already drafted. A blocked item aborts the whole commit rather than pushing part of an approved list.
+🟩 New tools: `check_product_gluten`, `recent_gluten_decisions`, `add_with_gluten_exception`, `propose_gluten_rule` / `commit_gluten_rule`, `set_product_gluten_override`.
+🟩 Deliberate exceptions go through a **separate tool**, not a flag on the normal add path — a confused model cannot stumble into an override while doing ordinary work. `once` scope is consumed on use so a one-off cannot silently become permanent.
+🟩 `/glutenlog` Telegram command surfaces recent decisions + standing overrides.
+🟩 `npm run smoke:allergen`: 47 checks, no network / session / API key needed. Covers each layer, the fail-safe paths, override behaviour, and **wiring integration** (that the tool handlers actually call the guard — a guard that exists but is never invoked being the failure mode that matters most).
+
+**Deliberately not built:** LLM interpretation of free-text ingredients (layer 3) — see v2 backlog.
+
+**Known limitation:** the upstream library flattens Picnic's "Bevat" and "Bevat mogelijk" (traces) into one `allergens` array, discarding the headings. Safety is unaffected — this household blocks on either — but a block reason says "staat op de allergenenlijst" rather than distinguishing contains from traces. Recovering the split means re-parsing the raw Fusion page ourselves.
+
+### Step 12 — Picnic recipes as a menu source ✅
+**Endpoint discovery (all verified against a live account):**
+🟩 `picnic-api`'s `getRecipeDetailsPage()` is BROKEN — it requests `recipe-details-page-root`, a page id Picnic has retired ("page with id … was not found"). The documented REST route `GET /recipes/{id}` 404s too.
+🟩 Recipe details live at `GET /pages/selling-group-details-page?selling_group_id=<id>`. The parameter name is load-bearing: `?id=` and `?recipe_id=` both fail with a render error.
+🟩 Saved recipes live at `GET /pages/saved-deep-dive-page-content`. The meals landing page cannot serve them — its saved carousel is capped at 12 — and `saved-deep-dive-page` is only a shell that defers to the `-content` page.
+🟩 Method: Fusion pages are addressed by a registry id, so instead of guessing, the app's own deep links (`app.picnic://store/page;id=<pageId>`) enumerate the ids that exist.
+
+**Built:**
+🟩 `src/recipe/types.ts`: source-agnostic `RecipeSource` / `RecipeSummary` / `RecipeDetails`. No mention of Picnic, so a personal recipe DB slots in behind the same interface.
+🟩 `src/recipe/fusion-parse.ts`: saved list from tile deep links (which spell out id+name+image, sidestepping the PML template layer); details from the page state object, with the analytics context as a fallback since the two fail differently.
+🟩 `src/recipe/registry.ts`: merges sources, namespaces ids `<source>:<id>`, reports a failing source instead of silently returning a shorter list.
+🟩 Tools: `list_recipes`, `get_recipe_details`, `add_recipe_to_draft`. The recipe path is gated by the gluten guard exactly like every other cart-entry path.
+🟩 `RECIPE_RULES` rewritten: start from saved recipes, never pass invention off as a favourite, honour brand preferences over Picnic's pick.
+🟩 `smoke:recipe` (36 checks, fixtures) + `verify:recipe` (real captured data, `--live` to fetch fresh).
+
+**Two findings that only real data exposed:**
+🟩 An early traversal capped arrays at 40 entries, so the tooling reported **12 saved recipes when there were 96**. Caught by the household checking against the app. Traversal is now exhaustive and the report enumerates every id array so "the list isn't here" is evidence rather than assumption.
+🟩 Picnic lists optional pantry extras alongside real ingredients. One recipe parsed as 15 ingredients / €48.33, of which only 6 pre-selected / €11.80 are the actual shopping list — treating all 15 as the list would turn a five-recipe week from ~€59 into ~€242. `RecipeIngredient.selected` now carries the app's own selection signal.
+
+**Deliberately not built:** browsing Picnic's full catalogue. The meals page only exposes category carousels capped at ~20, so it is not a usable "all recipes" listing; saved recipes are the reliable set and the better menu source anyway.
+
+### Step 13 — Live validation ✅
+Run against the real account, end to end. Total API cost of all testing: ~€0.62.
+
+🟩 `verify:recipe --live`: 3 recipes parsed, every ingredient resolved to an article id, saved list matches the app (95 after one was unsaved mid-testing; the diff was exactly one recipe, confirming the parser tracks the library rather than approximating it).
+🟩 `verify:allergen`: 20 real articles. Picnic publishes allergen lists for 55% and ingredient lists for 75%. Guard verdicts: 60% allowed, 15% blocked (all three genuinely gluten), 25% unverified (all five loose produce).
+🟩 `smoke:agent`: proposed a week menu from real saved recipes, blocked the gluten gnocchi, found a gluten-free alternative unprompted, and answered an ingredient query with 2 warnings out of 9.
+
+**Six defects that only live data exposed — every one had passed a fixture suite first:**
+| Defect | Cause |
+|---|---|
+| Reported 12 saved recipes, actual 96 | traversal capped arrays at 40 entries |
+| €48 risotto | pantry extras treated as the shopping list |
+| 45% of items flagged unverified | conclusion logic refused to trust a clean ingredient list |
+| "bevat gluten" allowed through | rulebook was load-bearing for the basics |
+| Invented "(pasta = gluten)" labels on 8 recipes | prompt forbade guessing in only one direction |
+| "95 recipes" printed above a list of 40 | truncation never surfaced in the tool result |
+
+**The pattern worth remembering:** the two safety defects (the traversal cap and the "bevat gluten" hole) were *concealed* by the tests, because the fixtures encoded the same misunderstanding as the code and the two agreed with each other. Fixtures verify behaviour against an assumption; only real payloads test the assumption. Both `verify:*` scripts exist for that reason and should be re-run after any parser or guard change.
+
+🟥 **Not yet done:** a full weekly draft (5 recipes, ~40 product fetches). Single-recipe runs do not exercise real basket size, cumulative fetch latency, or whether brand preferences actually get applied across a whole list. That run is also the data both v2 backlog items are waiting on.
+
 ---
 
 ## v2 Backlog (designed, not built)
@@ -166,6 +227,42 @@ Baseline VPS hardening (Step 9) applies to all three.
 - **Cold-start caveat:** first 2–3 weeks of data are noisy. Phrase as questions, not learnings.
 
 **Why deferred:** data model (`suggestion_log`) is in v1; adding diff is ~1 day later. Waiting lets us tune on real data.
+
+### Allergen guard — unverified-noise / warning fatigue
+**The problem:** an empty allergen list from Picnic is ambiguous — it can mean "this product has no allergens" or "we have no data" — and the guard cannot tell the two apart, so it fails safe to `unverified`. Fresh produce and unlabelled staples therefore come back unverified by design. If a weekly draft of ~20 items produces 10+ warnings, the household stops reading them, and a warning nobody reads is worse than no warning: it is the safety-theatre failure mode that actively erodes the guard's value.
+
+**Already mitigated in v1 (may be enough):**
+- Unverified items are grouped at the approval step rather than announced per-add.
+- A standing `allowed` override permanently silences a known-safe staple (`set_product_gluten_override`).
+
+**Options if it still proves noisy in real use:**
+- Auto-suppress whole product categories that are inherently unlabelled (loose fruit/veg), with the suppression itself visible in `/glutenlog`.
+- Treat "ingredient text present and clean, no allergen block" as a weaker `allowed` rather than `unverified` — trades a little caution for far less noise.
+- Track per-article "seen and confirmed by a human N times" and stop re-warning after the first confirmation.
+- Nudge the household to convert repeat offenders into overrides, e.g. a batched "these 5 products keep coming up unverified — confirm once and I'll stop asking".
+
+**Why deferred:** the right fix depends on the actual unverified rate against the household's real basket, which we cannot know until the guard has run over a few live weekly drafts. Tuning now would be guessing. **Revisit after the first 2–3 real orders** — check what fraction of items land `unverified` and whether the grouping alone keeps it tolerable.
+
+**Measured and resolved (Step 13, 20 real articles).** Three stages:
+1. 45% unverified — logic too cautious.
+2. 25% after tuning the conclusion logic and seed rulebook. Every remaining case was unlabelled fresh produce, so no rulebook change could improve it further.
+3. **5% after the household confirmed four produce items once**, via `remember_products_as_safe`. Allowed rose 60% → 80%; blocked stayed at 15%, i.e. remembering cleared exactly the produce and left every genuinely gluten-containing product blocked.
+
+That is low enough that each remaining warning still means something, which was the goal. The lever turned out to be the one this entry predicted — standing overrides — so no further work is needed here unless a real weekly basket behaves differently. `verify:allergen` reports the number directly and lists what has been remembered.
+
+### Allergen guard — contains vs. traces precision
+**The problem:** the upstream library flattens Picnic's "Bevat" (contains) and "Bevat mogelijk" (traces) into a single `allergens` array and discards the headings, and the structured type that preserves the split (`Article.allergies`) is not reachable from any service method.
+
+**Impact:** none on safety — this household blocks on either — but a block reason reads "staat op de allergenenlijst" instead of distinguishing "contains gluten" from "may contain traces", which slightly weakens the transparency goal.
+
+**Fix if wanted:** parse the raw Fusion page ourselves (`product-page-allergies` block) keeping the headings, instead of relying on the library's flattened field. ~30 lines, one extra parser to maintain, equally exposed to a Picnic layout change.
+
+### Allergen guard — layer 3 (LLM interpretation)
+**Goal:** catch gluten in free-text ingredient declarations that the deterministic layers miss (novel phrasings, e.g. "orzo" = wheat pasta, "mout" = barley malt, ambiguous "gemodificeerd zetmeel").
+
+**Mechanism:** an escalate-only Claude call over the residual ingredient text, guided by the same `gluten-rules.md` rulebook, with its reasoning written to the `allergen_decisions` log. The safety invariant is structural: the LLM can only make a product *more* cautious (allow/unverified → block/unverified), never turn a block into an allow.
+
+**Why deferred:** adds a per-product API call (cost) to every gluten check. v1 ships the deterministic engine (layer 0 override + layer 1 Picnic allergen field + layer 2 rulebook), which covers the labelled-allergen and known-term cases without extra spend. Add layer 3 once we see how often the rulebook alone falls short on real product data.
 
 ### ~~Slot reservation (Level C)~~ — moved to v1
 Step 2a investigation found `setDeliverySlot` is exposed by MRVDH v4. Now part of v1 scope. See `docs/decision-step2.md`.

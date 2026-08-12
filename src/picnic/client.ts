@@ -56,8 +56,24 @@ export type DeliveryDetail = Awaited<ReturnType<Inner['delivery']['getDelivery']
 export type SellingUnit = Awaited<ReturnType<Inner['catalog']['search']>>[number];
 export type GetDeliverySlotsResult = Awaited<ReturnType<Inner['cart']['getDeliverySlots']>>;
 export type FusionPage = Awaited<ReturnType<Inner['recipe']['getRecipesPage']>>;
+export type ProductDetails = Awaited<ReturnType<Inner['catalog']['getProductDetails']>>;
 
 export type PicnicCountryCode = 'NL' | 'DE' | 'FR';
+
+/**
+ * The underlying client extends an HTTP client that exposes `sendRequest` for
+ * endpoints the library does not wrap. Typed structurally here so `rawGet`
+ * does not need an `any`.
+ */
+interface RawSender {
+  sendRequest<TReq, TRes>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    data?: TReq | null,
+    includePicnicHeaders?: boolean,
+    isImageRequest?: boolean,
+  ): Promise<TRes>;
+}
 
 export interface PicnicClientOptions {
   username: string;
@@ -205,6 +221,27 @@ export class PicnicClient {
   }
 
   /**
+   * Structured product details for a single article — brand, unit, price, and
+   * (critically for the allergen guard) the declared `allergens` list plus the
+   * free-text "Ingrediënten" info section.
+   *
+   * `search_picnic_products` returns NO allergen data whatsoever, so this is
+   * the only route to a gluten verdict. One call per candidate article, hence
+   * the caching in `src/allergen/`.
+   *
+   * ⚠️ MRVDH marks the underlying method experimental: it parses Picnic's
+   * dynamic Fusion/PML page and can break if Picnic restyles the PDP. Callers
+   * MUST treat a throw as "allergen status unknown", never as "safe" — see
+   * `evaluateGluten`, which fails safe on exactly this path.
+   */
+  async getProductDetails(productId: string): Promise<ProductDetails> {
+    return this.callAuthed(
+      () => this.inner.catalog.getProductDetails(productId),
+      'getProductDetails',
+    );
+  }
+
+  /**
    * The Picnic "Recipes" overview page (a Fusion page — Picnic's CMS-style
    * structured content). The agent layer will need to parse this for both
    * "browse all recipes" and "user's saved recipes" — the saved-recipes list
@@ -214,6 +251,56 @@ export class PicnicClient {
    */
   async getRecipesPage(): Promise<FusionPage> {
     return this.callAuthed(() => this.inner.recipe.getRecipesPage(), 'getRecipesPage');
+  }
+
+  /**
+   * The household's SAVED recipes ("Bewaard"), in full.
+   *
+   * Not `getRecipesPage()`: that returns the meals landing page, whose saved
+   * section is a carousel capped at 12 regardless of how many are saved. This
+   * endpoint returned all 96 for a household with 60+ saved.
+   *
+   * Note the two-step shape — `saved-deep-dive-page` is only a shell whose
+   * header reads "Bewaard"; the recipes live in the `-content` page, which is
+   * what we request directly.
+   */
+  async getSavedRecipesPage(): Promise<FusionPage> {
+    return this.rawGet<FusionPage>('/pages/saved-deep-dive-page-content');
+  }
+
+  /**
+   * The detail page for one recipe — ingredients, portions, steps, pricing.
+   *
+   * The parameter name matters: `?id=` and `?recipe_id=` both fail with a
+   * render error, and only `selling_group_id` works. Picnic calls recipes
+   * "selling groups" internally.
+   *
+   * NOT `recipe.getRecipeDetailsPage()` — the library points at
+   * `recipe-details-page-root`, a page id that no longer exists (Picnic
+   * answers "page with id ... was not found"). That method is broken in
+   * picnic-api 4.4.0; this replaces it.
+   */
+  async getRecipeDetailsPage(recipeId: string): Promise<FusionPage> {
+    return this.rawGet<FusionPage>(
+      `/pages/selling-group-details-page?selling_group_id=${encodeURIComponent(recipeId)}`,
+    );
+  }
+
+  /**
+   * Send a raw authenticated GET to an arbitrary Picnic path.
+   *
+   * DIAGNOSTIC USE ONLY — for the capture/probe scripts that map undocumented
+   * endpoints. Production code must go through a named method above, so the
+   * set of endpoints the bot depends on stays visible in one place.
+   *
+   * Deliberately GET-only: exploration should never be able to mutate the
+   * account, and a raw POST helper would make that possible by accident.
+   */
+  async rawGet<T>(path: string): Promise<T> {
+    return this.callAuthed(
+      () => (this.inner as unknown as RawSender).sendRequest<null, T>('GET', path, null, true),
+      `rawGet ${path}`,
+    );
   }
 
   // ──────────────────────────────────────────────────────────────────────

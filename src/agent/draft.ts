@@ -24,6 +24,18 @@ export interface DraftItem {
   articleId: string;
   articleName: string;
   quantity: number;
+  /**
+   * Gluten verdict recorded when the item was added. `blocked` items never
+   * reach the draft, so in practice this is 'allowed' or 'unverified' — but an
+   * unverified item MUST keep its flag all the way to the approval step, which
+   * is the whole point of storing it here rather than recomputing at commit.
+   *
+   * Optional because drafts written before this field existed are still valid;
+   * they read back as undefined and are treated as unverified.
+   */
+  glutenStatus?: 'allowed' | 'unverified';
+  /** The guard's one-line reason, shown verbatim next to the item. */
+  glutenNote?: string;
 }
 
 /**
@@ -45,16 +57,36 @@ export function addToDraft(
   articleId: string,
   articleName: string,
   quantityToAdd = 1,
+  gluten?: { status: 'allowed' | 'unverified'; note: string },
 ): DraftItem[] {
   const items = loadDraft(db, conversationKey);
   const existing = items.find((i) => i.articleId === articleId);
   if (existing) {
     existing.quantity += quantityToAdd;
+    // Refresh the verdict on re-add: the latest check is the authoritative one.
+    if (gluten) {
+      existing.glutenStatus = gluten.status;
+      existing.glutenNote = gluten.note;
+    }
   } else {
-    items.push({ articleId, articleName, quantity: quantityToAdd });
+    items.push({
+      articleId,
+      articleName,
+      quantity: quantityToAdd,
+      ...(gluten ? { glutenStatus: gluten.status, glutenNote: gluten.note } : {}),
+    });
   }
   upsertDraftCart(db, conversationKey, items);
   return items;
+}
+
+/**
+ * Items in the draft whose gluten status is not a clean "allowed". Used to
+ * surface unverified items at the approval step, where the household actually
+ * decides — a warning buried at add-time is a warning that gets scrolled past.
+ */
+export function unverifiedDraftItems(items: DraftItem[]): DraftItem[] {
+  return items.filter((i) => i.glutenStatus !== 'allowed');
 }
 
 /**
