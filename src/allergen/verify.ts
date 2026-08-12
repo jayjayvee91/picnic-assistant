@@ -26,8 +26,10 @@
 import 'dotenv/config';
 import { join } from 'node:path';
 
-import { PicnicClient } from '../picnic/index.js';
+import { PicnicClient, type ProductDetails } from '../picnic/index.js';
 import { PicnicRecipeSource } from '../recipe/index.js';
+import { ensureRulebookSeeded, loadRulebook } from './rulebook.js';
+import { evaluateGluten, type GlutenVerdict } from './guard.js';
 
 interface Row {
   articleId: string;
@@ -35,6 +37,9 @@ interface Row {
   hasAllergens: boolean;
   hasIngredients: boolean;
   allergens: string[];
+  /** What the guard actually decides for this product. */
+  verdict: GlutenVerdict;
+  reason: string;
 }
 
 async function main(): Promise<void> {
@@ -74,39 +79,49 @@ async function main(): Promise<void> {
     `Checking allergen data for ${articles.size} articles from ${sample.length} recipe(s)…\n`,
   );
 
+  // Run the real guard, not just a data census. Coverage tells us what Picnic
+  // publishes; the verdict tells us what the household will actually see on a
+  // shopping list, which is the number that decides whether the warnings stay
+  // readable.
+  const rulebookPath = process.env['GLUTEN_RULES_FILE'] ?? join(dataDir, 'gluten-rules.md');
+  if (await ensureRulebookSeeded(rulebookPath)) {
+    console.log(`(seeded a fresh rulebook at ${rulebookPath})\n`);
+  }
+  const rulebook = await loadRulebook(rulebookPath);
+
   const rows: Row[] = [];
   for (const articleId of articles.keys()) {
+    let details: ProductDetails | null = null;
     try {
-      const d = await client.getProductDetails(articleId);
-      const allergens = Array.isArray(d.allergens) ? d.allergens : [];
-      const ingredients = (Array.isArray(d.infoSections) ? d.infoSections : []).find(
-        (s) => typeof s?.title === 'string' && /ingredi/i.test(s.title),
-      );
-      rows.push({
-        articleId,
-        name: typeof d.name === 'string' ? d.name : articleId,
-        hasAllergens: allergens.length > 0,
-        hasIngredients: Boolean(ingredients?.content),
-        allergens,
-      });
+      details = await client.getProductDetails(articleId);
     } catch (err) {
       console.error(`  fetch failed for ${articleId}: ${err instanceof Error ? err.message : err}`);
-      rows.push({
-        articleId,
-        name: articleId,
-        hasAllergens: false,
-        hasIngredients: false,
-        allergens: [],
-      });
     }
+    const allergens = Array.isArray(details?.allergens) ? details.allergens : [];
+    const ingredients = (Array.isArray(details?.infoSections) ? details.infoSections : []).find(
+      (s) => typeof s?.title === 'string' && /ingredi/i.test(s.title),
+    );
+    const decision = evaluateGluten({ details, rulebook });
+    rows.push({
+      articleId,
+      name: typeof details?.name === 'string' ? details.name : articleId,
+      hasAllergens: allergens.length > 0,
+      hasIngredients: Boolean(ingredients?.content),
+      allergens,
+      verdict: decision.verdict,
+      reason: decision.reason,
+    });
   }
 
+  const mark = (v: GlutenVerdict): string =>
+    v === 'blocked' ? 'GEBLOKKEERD' : v === 'unverified' ? 'ONBEVESTIGD ' : 'ok          ';
+
   for (const r of rows) {
-    const marks = [
-      r.hasAllergens ? `allergenen: ${r.allergens.join(', ')}` : 'GEEN allergenen',
-      r.hasIngredients ? 'ingrediënten aanwezig' : 'GEEN ingrediënten',
-    ].join('  |  ');
-    console.log(`  ${r.articleId.padEnd(11)} ${r.name.slice(0, 40).padEnd(42)} ${marks}`);
+    const data = [
+      r.hasAllergens ? `allergenen: ${r.allergens.join(', ')}` : 'geen allergenen',
+      r.hasIngredients ? 'ingrediënten' : 'geen ingrediënten',
+    ].join(' | ');
+    console.log(`  ${mark(r.verdict)} ${r.name.slice(0, 34).padEnd(36)} ${data}`);
   }
 
   const total = rows.length;
@@ -115,13 +130,48 @@ async function main(): Promise<void> {
   const withNeither = rows.filter((r) => !r.hasAllergens && !r.hasIngredients).length;
   const pct = (n: number): string => `${((n / Math.max(1, total)) * 100).toFixed(0)}%`;
 
+  const blocked = rows.filter((r) => r.verdict === 'blocked');
+  const unverified = rows.filter((r) => r.verdict === 'unverified');
+  const allowed = rows.filter((r) => r.verdict === 'allowed');
+
   console.log('');
   console.log('='.repeat(60));
-  console.log(`Articles checked:            ${total}`);
-  console.log(`With an allergen list:       ${withAllergens}  (${pct(withAllergens)})`);
-  console.log(`With an ingredient list:     ${withIngredients}  (${pct(withIngredients)})`);
-  console.log(`With NEITHER:                ${withNeither}  (${pct(withNeither)})`);
+  console.log('WHAT PICNIC PUBLISHES');
+  console.log(`  Articles checked:          ${total}`);
+  console.log(`  With an allergen list:     ${withAllergens}  (${pct(withAllergens)})`);
+  console.log(`  With an ingredient list:   ${withIngredients}  (${pct(withIngredients)})`);
+  console.log(`  With NEITHER:              ${withNeither}  (${pct(withNeither)})`);
+  console.log('');
+  console.log('WHAT THE GUARD DECIDES  (this is what you would see on a list)');
+  console.log(`  Allowed:                   ${allowed.length}  (${pct(allowed.length)})`);
+  console.log(`  Blocked (gluten):          ${blocked.length}  (${pct(blocked.length)})`);
+  console.log(`  Unverified (warnings):     ${unverified.length}  (${pct(unverified.length)})`);
   console.log('='.repeat(60));
+  console.log('');
+
+  if (blocked.length > 0) {
+    console.log('Blocked:');
+    for (const r of blocked) console.log(`  - ${r.name}: ${r.reason}`);
+    console.log('');
+  }
+  if (unverified.length > 0) {
+    console.log('Unverified — these are the warnings you would have to read:');
+    for (const r of unverified) console.log(`  - ${r.name}: ${r.reason}`);
+    console.log('');
+  }
+
+  // Warning volume is the thing that decides whether this guard survives
+  // contact with a real weekly shop, so judge it explicitly.
+  const unvPct = (unverified.length / Math.max(1, total)) * 100;
+  if (unvPct > 40) {
+    console.log('WARNING VOLUME: too high. At this rate the warnings stop being read,');
+    console.log('which is more dangerous than fewer, better-targeted ones. Worth tuning.');
+  } else if (unvPct > 20) {
+    console.log('WARNING VOLUME: workable but not comfortable. Consider standing');
+    console.log('overrides for staples that keep reappearing here.');
+  } else {
+    console.log('WARNING VOLUME: low enough that each warning still means something.');
+  }
   console.log('');
 
   // The interpretation is the point of the script, so state it rather than
