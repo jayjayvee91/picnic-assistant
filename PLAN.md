@@ -191,6 +191,27 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 **Deliberately not built:** browsing Picnic's full catalogue. The meals page only exposes category carousels capped at ~20, so it is not a usable "all recipes" listing; saved recipes are the reliable set and the better menu source anyway.
 
+### Step 13 — Live validation ✅
+Run against the real account, end to end. Total API cost of all testing: ~€0.62.
+
+🟩 `verify:recipe --live`: 3 recipes parsed, every ingredient resolved to an article id, saved list matches the app (95 after one was unsaved mid-testing; the diff was exactly one recipe, confirming the parser tracks the library rather than approximating it).
+🟩 `verify:allergen`: 20 real articles. Picnic publishes allergen lists for 55% and ingredient lists for 75%. Guard verdicts: 60% allowed, 15% blocked (all three genuinely gluten), 25% unverified (all five loose produce).
+🟩 `smoke:agent`: proposed a week menu from real saved recipes, blocked the gluten gnocchi, found a gluten-free alternative unprompted, and answered an ingredient query with 2 warnings out of 9.
+
+**Six defects that only live data exposed — every one had passed a fixture suite first:**
+| Defect | Cause |
+|---|---|
+| Reported 12 saved recipes, actual 96 | traversal capped arrays at 40 entries |
+| €48 risotto | pantry extras treated as the shopping list |
+| 45% of items flagged unverified | conclusion logic refused to trust a clean ingredient list |
+| "bevat gluten" allowed through | rulebook was load-bearing for the basics |
+| Invented "(pasta = gluten)" labels on 8 recipes | prompt forbade guessing in only one direction |
+| "95 recipes" printed above a list of 40 | truncation never surfaced in the tool result |
+
+**The pattern worth remembering:** the two safety defects (the traversal cap and the "bevat gluten" hole) were *concealed* by the tests, because the fixtures encoded the same misunderstanding as the code and the two agreed with each other. Fixtures verify behaviour against an assumption; only real payloads test the assumption. Both `verify:*` scripts exist for that reason and should be re-run after any parser or guard change.
+
+🟥 **Not yet done:** a full weekly draft (5 recipes, ~40 product fetches). Single-recipe runs do not exercise real basket size, cumulative fetch latency, or whether brand preferences actually get applied across a whole list. That run is also the data both v2 backlog items are waiting on.
+
 ---
 
 ## v2 Backlog (designed, not built)
@@ -221,6 +242,8 @@ Baseline VPS hardening (Step 9) applies to all three.
 - Nudge the household to convert repeat offenders into overrides, e.g. a batched "these 5 products keep coming up unverified — confirm once and I'll stop asking".
 
 **Why deferred:** the right fix depends on the actual unverified rate against the household's real basket, which we cannot know until the guard has run over a few live weekly drafts. Tuning now would be guessing. **Revisit after the first 2–3 real orders** — check what fraction of items land `unverified` and whether the grouping alone keeps it tolerable.
+
+**First measurement (Step 13, 20 real articles):** 45% → 25% after tuning the conclusion logic and the seed rulebook. Every remaining unverified item was loose fresh produce with no label to read, so rulebook changes cannot improve it further — the only lever left is standing overrides for staples that reappear weekly. 25% is workable but not comfortable; `verify:allergen` now reports this number directly, so re-measure on a full weekly basket before deciding whether to build anything.
 
 ### Allergen guard — contains vs. traces precision
 **The problem:** the upstream library flattens Picnic's "Bevat" (contains) and "Bevat mogelijk" (traces) into a single `allergens` array and discards the headings, and the structured type that preserves the split (`Article.allergies`) is not reachable from any service method.
