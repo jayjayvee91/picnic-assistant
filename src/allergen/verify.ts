@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   }
 
   const mark = (v: GlutenVerdict): string =>
-    v === 'blocked' ? 'GEBLOKKEERD' : v === 'unverified' ? 'ONBEVESTIGD ' : 'ok          ';
+    v === 'blocked' ? 'GEBLOKKEERD ' : v === 'unverified' ? 'ONBEVESTIGD ' : 'ok          ';
 
   for (const r of rows) {
     const data = [
@@ -176,23 +176,36 @@ async function main(): Promise<void> {
 
   // The interpretation is the point of the script, so state it rather than
   // leaving a pile of numbers for someone to squint at.
+  //
+  // The diagnosis must be driven by the VERDICTS, not by coverage alone. An
+  // earlier version branched on coverage only and told a household whose
+  // unverified items were all unlabelled produce that their problem was
+  // "rulebook tuning rather than missing data" — the exact opposite of the
+  // truth, on a tool people are meant to trust about a medical constraint.
+  const noLabel = unverified.filter((r) => !r.hasAllergens && !r.hasIngredients);
+  const otherUnverified = unverified.length - noLabel.length;
+
   if (withAllergens === 0 && withIngredients === 0) {
     console.log('DIAGNOSIS: no product returned ANY allergen or ingredient data.');
     console.log('That points at the upstream product-page parser being broken, not at');
     console.log('Picnic lacking data — a fixable problem, and one that currently makes');
     console.log('the gluten guard far weaker than it appears.');
-  } else if (withNeither > total / 2) {
-    console.log('DIAGNOSIS: most products carry no allergen or ingredient data at all,');
-    console.log('but some do — so the parser works and Picnic simply publishes little.');
-    console.log('Code cannot fix this. The realistic levers are per-product overrides');
-    console.log('for repeat staples, and grouping the warnings so they stay readable.');
-  } else if (withAllergens < total / 2) {
-    console.log('DIAGNOSIS: ingredient text is usually present but a declared allergen');
-    console.log('list often is not. The rulebook is therefore doing most of the work,');
-    console.log('which makes tuning the terms in gluten-rules.md the highest-value fix.');
+  } else if (unverified.length === 0) {
+    console.log('DIAGNOSIS: every sampled product got a definite verdict. Nothing to tune.');
+  } else if (noLabel.length === unverified.length) {
+    console.log('DIAGNOSIS: every unverified product simply has no label at all — no');
+    console.log('ingredients and no allergens. That is normal for loose fresh produce,');
+    console.log('and no amount of rulebook tuning will change it: there is nothing to');
+    console.log('read. The only lever is a standing override per product, worth doing');
+    console.log('for staples that reappear every week.');
+  } else if (otherUnverified > noLabel.length) {
+    console.log('DIAGNOSIS: most unverified products DO have label data but still could');
+    console.log('not be judged — usually a doubtful term in gluten-rules.md matching too');
+    console.log('broadly. Check the reasons above; tuning those terms is the best fix.');
   } else {
-    console.log('DIAGNOSIS: allergen coverage is good. Products still flagged as');
-    console.log('unverified are likely rulebook tuning rather than missing data.');
+    console.log(`DIAGNOSIS: ${noLabel.length} unverified product(s) have no label at all`);
+    console.log(`(fresh produce — use overrides), and ${otherUnverified} were flagged by a rule`);
+    console.log('(see the reasons above — those are worth tuning in gluten-rules.md).');
   }
 }
 
