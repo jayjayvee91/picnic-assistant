@@ -18,13 +18,9 @@
 import 'dotenv/config';
 import { join } from 'node:path';
 import { PicnicClient, type PicnicCountryCode } from '../picnic/index.js';
-import {
-  openDatabase,
-  ensureProfileSeeded,
-  ensureProfileSection,
-  type DB,
-} from '../memory/index.js';
-import { AllergenChecker, ensureRulebookSeeded } from '../allergen/index.js';
+import { openDatabase, type DB } from '../memory/index.js';
+import { AllergenChecker } from '../allergen/index.js';
+import { prepareDataDir } from '../setup.js';
 import { PicnicRecipeSource, RecipeRegistry } from '../recipe/index.js';
 import { AgentAnthropicClient, AgentLoop, type AgentContext } from '../agent/index.js';
 import { startWeeklyNudge } from '../scheduler/index.js';
@@ -56,18 +52,11 @@ async function main(): Promise<void> {
   const dryRun = process.env['DRY_RUN'] !== 'false';
 
   const db: DB = openDatabase(dbPath);
-  await ensureProfileSeeded(profilePath);
-  // Households that predate the allergen guard have a profile without the
-  // section — add it so the medical constraint is in the prompt from turn one.
-  await ensureProfileSection(
+  await prepareDataDir({
     profilePath,
-    'Allergies',
-    'Coeliakie in het huishouden: NOOIT producten bestellen die gluten bevatten of ' +
-      'waar sporen van gluten in kunnen zitten.',
-  );
-  if (await ensureRulebookSeeded(rulebookPath)) {
-    console.log(`[allergen] seeded gluten rulebook at ${rulebookPath}`);
-  }
+    rulebookPath,
+    onCreated: (m) => console.log(`[setup] ${m}`),
+  });
 
   const picnic = new PicnicClient({
     username,

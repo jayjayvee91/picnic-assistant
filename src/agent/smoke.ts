@@ -28,8 +28,9 @@ import { stdin, stdout } from 'node:process';
 import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 
 import { PicnicClient } from '../picnic/index.js';
-import { openDatabase, ensureProfileSeeded, type DB } from '../memory/index.js';
-import { AllergenChecker, ensureRulebookSeeded } from '../allergen/index.js';
+import { openDatabase, type DB } from '../memory/index.js';
+import { AllergenChecker } from '../allergen/index.js';
+import { prepareDataDir } from '../setup.js';
 import { PicnicRecipeSource, RecipeRegistry } from '../recipe/index.js';
 import {
   AgentAnthropicClient,
@@ -62,8 +63,11 @@ async function main(): Promise<void> {
   const dryRun = process.env['DRY_RUN'] !== 'false';
 
   const db: DB = openDatabase(dbPath);
-  await ensureProfileSeeded(profilePath);
-  await ensureRulebookSeeded(rulebookPath);
+  await prepareDataDir({
+    profilePath,
+    rulebookPath,
+    onCreated: (m) => console.log(`[setup] ${m}`),
+  });
 
   const picnic = new PicnicClient({
     username,
