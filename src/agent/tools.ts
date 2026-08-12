@@ -157,7 +157,10 @@ export const AGENT_TOOLS: Tool[] = [
         query: {
           type: 'string',
           description:
-            'Optional case-insensitive filter on the recipe name, e.g. "pasta", "curry".',
+            'Optional filter on the recipe name. All words must appear, in any ' +
+            'order, ignoring case and accents — so "quinoabowl pompoen" finds ' +
+            '"Quinoabowl met bloemkool en pompoen". If a user names a recipe, ' +
+            'search with its DISTINCTIVE words rather than the whole sentence.',
         },
         limit: { type: 'number', description: 'Max results (default 40, max 100).' },
       },
@@ -893,11 +896,11 @@ async function handleListRecipes(
   ctx: AgentContext,
   input: Record<string, unknown>,
 ): Promise<unknown> {
-  const query = typeof input['query'] === 'string' ? input['query'].toLowerCase() : null;
+  const query = typeof input['query'] === 'string' ? input['query'] : null;
   const limit = clampNumber(input['limit'], 1, 100, 40);
 
   const { recipes, failures } = await ctx.recipes.listRecipes({ savedOnly: true });
-  const filtered = query ? recipes.filter((r) => r.name.toLowerCase().includes(query)) : recipes;
+  const filtered = query ? recipes.filter((r) => matchesRecipeQuery(r.name, query)) : recipes;
 
   const shown = filtered.slice(0, limit);
   return {
@@ -906,6 +909,19 @@ async function handleListRecipes(
     returned: shown.length,
     // Without this the model announces the total and then prints one page,
     // e.g. "here are your 95 saved recipes" above a list of 40.
+    // "Not in your saved recipes" is a damaging thing to say wrongly — the
+    // household knows it saved that recipe. When a query matches nothing, hand
+    // back some real names so the model asks rather than asserting.
+    ...(query && filtered.length === 0
+      ? {
+          noMatchNote:
+            `Geen recept met "${query}" in de naam. Dat betekent NIET dat het recept er ` +
+            'niet is — de zoekterm week mogelijk af van de precieze naam. Zeg dat je het ' +
+            'niet kunt vinden en vraag welke bedoeld wordt; beweer niet dat het niet ' +
+            'bewaard is.',
+          someSavedRecipes: recipes.slice(0, 15).map((r) => r.name),
+        }
+      : {}),
     ...(shown.length < filtered.length
       ? {
           truncated: true,
@@ -1460,6 +1476,35 @@ function summariseProduct(p: SellingUnit): unknown {
     unit_quantity: obj.unit_quantity ?? null,
     price_cents: obj.display_price ?? obj.price ?? null,
   };
+}
+
+/**
+ * Match a recipe name against a search phrase.
+ *
+ * Every word in the query must appear in the name, in any order, ignoring case
+ * and diacritics. A plain substring test was too brittle: asked about
+ * "Quinoabowl met bloemkool en pompoen" — the household's own recipe #1 — a
+ * query that dropped the filler words matched nothing, and the assistant told
+ * them the recipe was not saved. Being wrong in that direction is worse than
+ * returning a few extra candidates.
+ *
+ * Words shorter than two characters are dropped so "en"/"met" cannot decide a
+ * match on their own.
+ */
+function matchesRecipeQuery(name: string, query: string): boolean {
+  const normalise = (value: string): string =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+
+  const haystack = normalise(name);
+  const words = normalise(query)
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 1);
+
+  if (words.length === 0) return true;
+  return words.every((w) => haystack.includes(w));
 }
 
 function requireString(input: Record<string, unknown>, key: string): string {
