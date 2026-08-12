@@ -28,8 +28,10 @@ import { join } from 'node:path';
 
 import { PicnicClient, type ProductDetails } from '../picnic/index.js';
 import { PicnicRecipeSource } from '../recipe/index.js';
+import { getAllergenOverride, listAllergenOverrides, openDatabase } from '../memory/index.js';
 import { ensureRulebookSeeded, loadRulebook } from './rulebook.js';
 import { evaluateGluten, type GlutenVerdict } from './guard.js';
+import { GLUTEN } from './check.js';
 
 interface Row {
   articleId: string;
@@ -89,6 +91,22 @@ async function main(): Promise<void> {
   }
   const rulebook = await loadRulebook(rulebookPath);
 
+  // Read the SAME override table the running assistant uses. An earlier
+  // version of this script called evaluateGluten with no override argument at
+  // all, so a product the household had explicitly remembered as safe still
+  // showed as unverified here — the tool reporting a problem the guard did not
+  // actually have, and giving no way to confirm that remembering worked.
+  const db = openDatabase(join(dataDir, 'data.db'));
+
+  const overrides = listAllergenOverrides(db, 100);
+  console.log(`Remembered / overridden products: ${overrides.length}`);
+  for (const o of overrides) {
+    console.log(
+      `  ${o.verdict.padEnd(8)} ${o.kind.padEnd(11)} ${(o.articleName ?? o.articleId).slice(0, 34)}`,
+    );
+  }
+  console.log('');
+
   const rows: Row[] = [];
   for (const articleId of articles.keys()) {
     let details: ProductDetails | null = null;
@@ -101,7 +119,14 @@ async function main(): Promise<void> {
     const ingredients = (Array.isArray(details?.infoSections) ? details.infoSections : []).find(
       (s) => typeof s?.title === 'string' && /ingredi/i.test(s.title),
     );
-    const decision = evaluateGluten({ details, rulebook });
+    const stored = getAllergenOverride(db, articleId, GLUTEN);
+    const decision = evaluateGluten({
+      details,
+      rulebook,
+      override: stored
+        ? { verdict: stored.verdict, reason: stored.reason, kind: stored.kind }
+        : null,
+    });
     rows.push({
       articleId,
       name: typeof details?.name === 'string' ? details.name : articleId,
