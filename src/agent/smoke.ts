@@ -30,6 +30,7 @@ import type { MessageParam } from '@anthropic-ai/sdk/resources/messages.mjs';
 import { PicnicClient } from '../picnic/index.js';
 import { openDatabase, ensureProfileSeeded, type DB } from '../memory/index.js';
 import { AllergenChecker, ensureRulebookSeeded } from '../allergen/index.js';
+import { PicnicRecipeSource, RecipeRegistry } from '../recipe/index.js';
 import {
   AgentAnthropicClient,
   AgentLoop,
@@ -86,6 +87,7 @@ async function main(): Promise<void> {
     profilePath,
     rulebookPath,
     allergen: new AllergenChecker({ db, picnic, rulebookPath }),
+    recipes: new RecipeRegistry([new PicnicRecipeSource({ picnic })]),
     conversationKey: 'smoke',
     proposedProfileAdditions: new Map(),
     proposedGlutenRules: new Map(),

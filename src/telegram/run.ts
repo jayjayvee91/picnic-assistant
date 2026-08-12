@@ -25,6 +25,7 @@ import {
   type DB,
 } from '../memory/index.js';
 import { AllergenChecker, ensureRulebookSeeded } from '../allergen/index.js';
+import { PicnicRecipeSource, RecipeRegistry } from '../recipe/index.js';
 import { AgentAnthropicClient, AgentLoop, type AgentContext } from '../agent/index.js';
 import { startWeeklyNudge } from '../scheduler/index.js';
 import { createBot } from './bot.js';
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
     profilePath,
     rulebookPath,
     allergen: new AllergenChecker({ db, picnic, rulebookPath }),
+    recipes: new RecipeRegistry([new PicnicRecipeSource({ picnic })]),
     conversationKey: 'telegram-main',
     proposedProfileAdditions: new Map(),
     proposedGlutenRules: new Map(),

@@ -170,12 +170,26 @@ Baseline VPS hardening (Step 9) applies to all three.
 
 **Known limitation:** the upstream library flattens Picnic's "Bevat" and "Bevat mogelijk" (traces) into one `allergens` array, discarding the headings. Safety is unaffected — this household blocks on either — but a block reason says "staat op de allergenenlijst" rather than distinguishing contains from traces. Recovering the split means re-parsing the raw Fusion page ourselves.
 
-### Step 12 — Picnic recipes as a menu source 🟥 NOT STARTED
-🟥 `RecipeSource` interface (`listRecipes` / `getRecipeDetails`) + registry, so a personal recipe DB plugs in later without touching tools or prompt
-🟥 `PicnicRecipeSource` + Fusion/PML parser for the saved-recipes (favourites) section and recipe ingredient lists
-🟥 `getRecipeDetailsPage` wrapper; `list_recipes` / `get_recipe_details` tools
-🟥 Recipe → ingredients → `search_picnic_products` (brand prefs win over Picnic's default pick) → gluten guard → draft → approve
-**Blocked on:** a captured authenticated response from the recipes page. The favourites list only exists as a nested PML component tree; a reliable parser needs real data to build against. Until this ships, `RECIPE_RULES` tells the model it has no access to Picnic recipes and must not pretend otherwise.
+### Step 12 — Picnic recipes as a menu source ✅
+**Endpoint discovery (all verified against a live account):**
+🟩 `picnic-api`'s `getRecipeDetailsPage()` is BROKEN — it requests `recipe-details-page-root`, a page id Picnic has retired ("page with id … was not found"). The documented REST route `GET /recipes/{id}` 404s too.
+🟩 Recipe details live at `GET /pages/selling-group-details-page?selling_group_id=<id>`. The parameter name is load-bearing: `?id=` and `?recipe_id=` both fail with a render error.
+🟩 Saved recipes live at `GET /pages/saved-deep-dive-page-content`. The meals landing page cannot serve them — its saved carousel is capped at 12 — and `saved-deep-dive-page` is only a shell that defers to the `-content` page.
+🟩 Method: Fusion pages are addressed by a registry id, so instead of guessing, the app's own deep links (`app.picnic://store/page;id=<pageId>`) enumerate the ids that exist.
+
+**Built:**
+🟩 `src/recipe/types.ts`: source-agnostic `RecipeSource` / `RecipeSummary` / `RecipeDetails`. No mention of Picnic, so a personal recipe DB slots in behind the same interface.
+🟩 `src/recipe/fusion-parse.ts`: saved list from tile deep links (which spell out id+name+image, sidestepping the PML template layer); details from the page state object, with the analytics context as a fallback since the two fail differently.
+🟩 `src/recipe/registry.ts`: merges sources, namespaces ids `<source>:<id>`, reports a failing source instead of silently returning a shorter list.
+🟩 Tools: `list_recipes`, `get_recipe_details`, `add_recipe_to_draft`. The recipe path is gated by the gluten guard exactly like every other cart-entry path.
+🟩 `RECIPE_RULES` rewritten: start from saved recipes, never pass invention off as a favourite, honour brand preferences over Picnic's pick.
+🟩 `smoke:recipe` (36 checks, fixtures) + `verify:recipe` (real captured data, `--live` to fetch fresh).
+
+**Two findings that only real data exposed:**
+🟩 An early traversal capped arrays at 40 entries, so the tooling reported **12 saved recipes when there were 96**. Caught by the household checking against the app. Traversal is now exhaustive and the report enumerates every id array so "the list isn't here" is evidence rather than assumption.
+🟩 Picnic lists optional pantry extras alongside real ingredients. One recipe parsed as 15 ingredients / €48.33, of which only 6 pre-selected / €11.80 are the actual shopping list — treating all 15 as the list would turn a five-recipe week from ~€59 into ~€242. `RecipeIngredient.selected` now carries the app's own selection signal.
+
+**Deliberately not built:** browsing Picnic's full catalogue. The meals page only exposes category carousels capped at ~20, so it is not a usable "all recipes" listing; saved recipes are the reliable set and the better menu source anyway.
 
 ---
 

@@ -143,22 +143,46 @@ const PROFILE_USAGE_RULES = `# Het huishoudprofiel
 suggest the new line. Only call \`commit_profile_addition\` after the user \
 explicitly approves. No drift.`;
 
-const RECIPE_RULES = `# Recepten
-- The user may paste a recipe URL or list ingredients directly.
-- For URLs: call \`fetch_recipe_url\`. ALWAYS show the extracted ingredient \
-list back in Dutch before mapping it to Picnic products. If extraction \
-returns nothing, ask the user to paste the ingredients.
-- For each ingredient, search Picnic with \`search_picnic_products\` and \
-propose ONE specific product (with name + unit_quantity). Let the user swap \
-before adding to draft/cart.
-- NEVER invent a recipe and present it as if it came from Picnic or from the \
-household. You currently have NO tool that reads Picnic's own recipes or the \
-user's saved favourites — so do not claim a suggestion is "a Picnic recipe" \
-or "one of your favourites". If the user asks for recipes from their Picnic \
-favourites, say plainly that you cannot read those yet and offer to work from \
-a URL, from pasted ingredients, or from their order history instead.
-- Suggesting a meal idea from your own knowledge IS fine when the user asks \
-what to cook — just be clear that it is your suggestion, not a saved recipe.`;
+const RECIPE_RULES = `# Recepten en weekmenu
+
+**Start from their saved recipes, not from your imagination.** The household \
+has a real library of saved Picnic recipes. When they ask what to eat, for a \
+week menu, or for ideas, call \`list_recipes\` FIRST and suggest from that. \
+Do NOT invent dishes and present them as if they came from Picnic or from \
+their favourites.
+
+Suggesting something from your own knowledge is fine when they ask for \
+something new, or when nothing saved fits — but say so plainly ("dit staat \
+niet in jullie bewaarde recepten, maar…"). Never blur the two.
+
+**Picking a recipe.** \`list_recipes\` takes an optional \`query\` to filter \
+by name ("pasta", "curry", "soep"). For a week menu, propose a varied set by \
+name and let the user confirm before adding anything.
+
+**What a recipe actually costs.** \`get_recipe_details\` and \
+\`add_recipe_to_draft\` return only the ingredients Picnic PRE-SELECTS. Picnic \
+also lists optional pantry extras — oil, cheese, stock — which roughly \
+quadruple the price and which the household usually already has. Do not pass \
+\`includeExtras\` unless the user asks for a complete list.
+
+**Brand preferences beat Picnic's choice.** Every ingredient comes back with \
+its brand. Check those against the Brands section of the household profile. \
+Where Picnic's pick conflicts with their stated preference, say so and offer \
+the swap (\`remove_from_draft\`, then \`search_picnic_products\` + \
+\`add_to_draft\`). Their preference wins.
+
+**Gluten.** Recipe ingredients go through the same guard as everything else. \
+If ingredients are blocked, name them and either propose a gluten-free \
+alternative or advise against that recipe — see the gluten section above.
+
+**Other sources.** \`list_recipes\` covers every configured recipe source, not \
+just Picnic. Each result says which source it came from; mention it when it \
+is not obvious.
+
+**Recipe URLs** still work: call \`fetch_recipe_url\`, show the extracted \
+ingredients in Dutch, then map each to a Picnic product with \
+\`search_picnic_products\`. If extraction fails, ask them to paste the \
+ingredients.`;
 
 const ALLERGEN_RULES = `# Gluten en coeliakie (VEILIGHEID — LEES DIT GOED)
 

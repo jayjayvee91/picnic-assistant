@@ -53,6 +53,15 @@ interface CacheEntry {
 export interface CheckResult extends GlutenDecision {
   articleId: string;
   articleName: string | null;
+  /**
+   * Name and brand as Picnic reports them. Free: the product page was fetched
+   * for the allergen check anyway, so callers that need to show or
+   * brand-match a product should read these rather than making another call.
+   */
+  productName: string | null;
+  brand: string | null;
+  unitQuantity: string | null;
+  priceCents: number | null;
   /** Row id in `allergen_decisions`, so a reply can point at the audit trail. */
   decisionId: number;
 }
@@ -104,7 +113,22 @@ export class AllergenChecker {
       matchedTerms: decision.matchedTerms,
     });
 
-    return { ...decision, articleId, articleName, decisionId };
+    const info = details as {
+      name?: unknown;
+      brand?: unknown;
+      unitQuantity?: unknown;
+      displayPrice?: unknown;
+    } | null;
+    return {
+      ...decision,
+      articleId,
+      articleName,
+      productName: typeof info?.name === 'string' ? info.name : null,
+      brand: typeof info?.brand === 'string' ? info.brand : null,
+      unitQuantity: typeof info?.unitQuantity === 'string' ? info.unitQuantity : null,
+      priceCents: typeof info?.displayPrice === 'number' ? info.displayPrice : null,
+      decisionId,
+    };
   }
 
   /** Drop cached product data (e.g. after a long-running conversation). */

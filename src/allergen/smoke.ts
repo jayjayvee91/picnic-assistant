@@ -27,7 +27,7 @@ import {
 import { AllergenChecker } from './check.js';
 import { openDatabase } from '../memory/index.js';
 import { handleToolUse, type AgentContext } from '../agent/tools.js';
-import { loadDraft } from '../agent/draft.js';
+import { loadDraft, emptyDraft } from '../agent/draft.js';
 import type { ProductDetails } from '../picnic/index.js';
 
 // ──────────────────────────────────────────────────────────────────────
@@ -382,6 +382,82 @@ await (async (): Promise<void> => {
   check(
     'a one-off exception is consumed, not permanent',
     afterOnce['blockedByGlutenGuard'] === true,
+  );
+
+  // ── The recipe path must be gated exactly like the others ──────────
+  // A recipe can pull a dozen articles into the draft in one call, so this is
+  // the highest-leverage place for the guard to be missing.
+  const { RecipeRegistry } = await import('../recipe/index.js');
+  const recipeCtx = ctx as unknown as { recipes: unknown };
+  recipeCtx.recipes = new RecipeRegistry([
+    {
+      name: 'picnic',
+      async listRecipes() {
+        return [{ id: 'r1', name: 'Testrecept', source: 'picnic', saved: true }];
+      },
+      async getRecipeDetails() {
+        return {
+          id: 'r1',
+          name: 'Testrecept',
+          source: 'picnic',
+          portions: 4,
+          ingredients: [
+            {
+              ingredientId: 'i1',
+              name: null,
+              articleId: 'rijst',
+              requiredAmount: 1,
+              priceCents: 100,
+              available: true,
+              core: true,
+              selected: true,
+            },
+            {
+              ingredientId: 'i2',
+              name: null,
+              articleId: 'glutenbrood',
+              requiredAmount: 1,
+              priceCents: 200,
+              available: true,
+              core: true,
+              selected: true,
+            },
+            {
+              ingredientId: 'i3',
+              name: null,
+              articleId: 'rijst',
+              requiredAmount: 1,
+              priceCents: 999,
+              available: true,
+              core: false,
+              selected: false,
+            },
+          ],
+        };
+      },
+    },
+  ]);
+
+  emptyDraft(db, 'smoke');
+  const recipeAdd = await call('add_recipe_to_draft', { recipeId: 'picnic:r1' });
+  const draftAfterRecipe = loadDraft(db, 'smoke');
+  check(
+    'add_recipe_to_draft refuses the gluten ingredient',
+    Array.isArray(recipeAdd['blockedByGlutenGuard']) &&
+      (recipeAdd['blockedByGlutenGuard'] as unknown[]).length === 1,
+  );
+  check(
+    'the gluten ingredient never enters the draft',
+    !draftAfterRecipe.some((i) => i.articleId === 'glutenbrood'),
+  );
+  check(
+    'the safe ingredient is added',
+    draftAfterRecipe.some((i) => i.articleId === 'rijst'),
+  );
+  check(
+    'optional pantry extras are excluded by default',
+    draftAfterRecipe.length === 1,
+    `draft had ${draftAfterRecipe.length} items`,
   );
 
   // A commit must refuse outright if any item is blocked. Seed the draft with a

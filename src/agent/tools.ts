@@ -39,6 +39,7 @@ import {
   type CheckResult,
   type RuleSection,
 } from '../allergen/index.js';
+import type { RecipeRegistry } from '../recipe/index.js';
 import {
   addToDraft,
   removeFromDraft,
@@ -59,6 +60,11 @@ export interface AgentContext {
   profilePath: string;
   /** Path to `gluten-rules.md` — the human-editable rulebook. */
   rulebookPath: string;
+  /**
+   * Where recipes come from. A registry rather than a single source, so a
+   * personal recipe database can be added later without touching these tools.
+   */
+  recipes: RecipeRegistry;
   /**
    * The gluten guard. Every path that puts an article into the draft or the
    * cart goes through this; it is not optional and not model-controlled.
@@ -136,6 +142,68 @@ export const AGENT_TOOLS: Tool[] = [
         query: { type: 'string', description: 'Substring to search for in product names.' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'list_recipes',
+    description:
+      "List the household's saved recipes (their Picnic favourites, plus any " +
+      'other configured recipe source). Use this whenever they ask what to eat, ' +
+      'for a week menu, or for recipe ideas. These are REAL saved recipes — ' +
+      'prefer them over inventing dishes. Returns id, name and source.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description:
+            'Optional case-insensitive filter on the recipe name, e.g. "pasta", "curry".',
+        },
+        limit: { type: 'number', description: 'Max results (default 40, max 100).' },
+      },
+    },
+  },
+  {
+    name: 'get_recipe_details',
+    description:
+      'Ingredients for one recipe, each already mapped to a specific Picnic ' +
+      'article. Returns which ingredients Picnic pre-selects (the actual ' +
+      'shopping list) versus optional pantry extras it merely offers, plus ' +
+      "each product's name, brand, price and gluten verdict. Use the id from " +
+      'list_recipes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        recipeId: { type: 'string', description: 'Id from list_recipes, e.g. "picnic:6335ac…".' },
+        includeExtras: {
+          type: 'boolean',
+          description:
+            'Also return the optional pantry extras (default false). The extras are ' +
+            'things like oil and cheese that the household probably already has.',
+        },
+      },
+      required: ['recipeId'],
+    },
+  },
+  {
+    name: 'add_recipe_to_draft',
+    description:
+      "Add a recipe's ingredients to the WEEKLY DRAFT. By default adds only " +
+      'the ingredients Picnic pre-selects, NOT the optional pantry extras — ' +
+      'adding everything roughly quadruples the cost. Every article goes ' +
+      'through the gluten check first; anything containing gluten is refused ' +
+      'and reported, never silently added. Show the resulting list to the user ' +
+      'and honour their brand preferences before committing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        recipeId: { type: 'string' },
+        includeExtras: {
+          type: 'boolean',
+          description: 'Also add the optional pantry extras (default false).',
+        },
+      },
+      required: ['recipeId'],
     },
   },
   {
@@ -425,6 +493,12 @@ async function dispatch(
       return handleSearchOrderHistory(ctx, input);
     case 'fetch_recipe_url':
       return await handleFetchRecipeUrl(input);
+    case 'list_recipes':
+      return await handleListRecipes(ctx, input);
+    case 'get_recipe_details':
+      return await handleGetRecipeDetails(ctx, input);
+    case 'add_recipe_to_draft':
+      return await handleAddRecipeToDraft(ctx, input);
     case 'check_product_gluten':
       return await handleCheckProductGluten(ctx, input);
     case 'recent_gluten_decisions':
@@ -690,6 +764,214 @@ async function handleAddToCartNow(
 
   await ctx.picnic.addProductToCart(articleId, quantity);
   return { ok: true, articleId, quantity, gluten: glutenSummary(check) };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Recipes
+// ──────────────────────────────────────────────────────────────────────
+
+async function handleListRecipes(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const query = typeof input['query'] === 'string' ? input['query'].toLowerCase() : null;
+  const limit = clampNumber(input['limit'], 1, 100, 40);
+
+  const { recipes, failures } = await ctx.recipes.listRecipes({ savedOnly: true });
+  const filtered = query ? recipes.filter((r) => r.name.toLowerCase().includes(query)) : recipes;
+
+  return {
+    total: recipes.length,
+    matched: filtered.length,
+    recipes: filtered.slice(0, limit).map((r) => ({ id: r.id, name: r.name, source: r.source })),
+    // Surfaced rather than swallowed: if a source is down the household should
+    // hear "I couldn't reach X" instead of a silently shorter list.
+    ...(failures.length > 0 ? { unavailableSources: failures } : {}),
+  };
+}
+
+/**
+ * Resolve a recipe's ingredients into concrete products, with a gluten verdict
+ * on each.
+ *
+ * One call per article, but the allergen checker caches product pages, so
+ * looking at a recipe and then adding it does not fetch anything twice.
+ */
+interface ResolvedIngredient {
+  articleId: string;
+  name: string | null;
+  brand: string | null;
+  unitQuantity: string | null;
+  quantity: number;
+  priceCents: number | null;
+  optionalExtra: boolean;
+  available: boolean;
+  gluten: Record<string, unknown>;
+  verdict: 'blocked' | 'allowed' | 'unverified';
+}
+
+interface ResolvedRecipe {
+  recipe: { id: string; name: string | null; portions: number | null };
+  items: ResolvedIngredient[];
+  /** Ingredients Picnic listed without a product — the agent must search. */
+  skippedNoArticle: number;
+}
+
+async function resolveIngredients(
+  ctx: AgentContext,
+  recipeId: string,
+  includeExtras: boolean,
+): Promise<ResolvedRecipe | null> {
+  const details = await ctx.recipes.getRecipeDetails(recipeId);
+  if (!details) return null;
+
+  const wanted = details.ingredients.filter((i) => includeExtras || i.selected);
+  const items: ResolvedIngredient[] = [];
+  let skippedNoArticle = 0;
+
+  for (const ing of wanted) {
+    if (!ing.articleId) {
+      skippedNoArticle++;
+      continue;
+    }
+    const check = await ctx.allergen.check(ing.articleId, null);
+    items.push({
+      articleId: ing.articleId,
+      name: check.productName,
+      brand: check.brand,
+      unitQuantity: check.unitQuantity,
+      quantity: ing.requiredAmount,
+      priceCents: ing.priceCents ?? check.priceCents,
+      optionalExtra: !ing.selected,
+      available: ing.available,
+      gluten: glutenSummary(check),
+      verdict: check.verdict,
+    });
+  }
+
+  return {
+    recipe: { id: details.id, name: details.name, portions: details.portions },
+    items,
+    skippedNoArticle,
+  };
+}
+
+async function handleGetRecipeDetails(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const recipeId = requireString(input, 'recipeId');
+  const includeExtras = input['includeExtras'] === true;
+
+  const resolved = await resolveIngredients(ctx, recipeId, includeExtras);
+  if (!resolved) {
+    return {
+      ok: false,
+      note:
+        'Kon dit recept niet ophalen of niet uitlezen. Vraag de gebruiker of ze het ' +
+        'recept anders willen aanduiden, of gebruik list_recipes opnieuw.',
+    };
+  }
+
+  const blocked = resolved.items.filter((i) => i.verdict === 'blocked');
+  return {
+    ok: true,
+    ...resolved.recipe,
+    ingredients: resolved.items,
+    ...(blocked.length > 0
+      ? {
+          glutenWarning:
+            `LET OP: ${blocked.length} ingredient(en) van dit recept bevatten gluten. ` +
+            'Noem ze bij naam en stel glutenvrije alternatieven voor, of raad dit ' +
+            'recept af.',
+        }
+      : {}),
+    ...(includeExtras
+      ? {}
+      : {
+          note: 'Alleen de ingrediënten die Picnic standaard aanvinkt. Gebruik includeExtras voor de rest.',
+        }),
+  };
+}
+
+async function handleAddRecipeToDraft(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const recipeId = requireString(input, 'recipeId');
+  const includeExtras = input['includeExtras'] === true;
+
+  const resolved = await resolveIngredients(ctx, recipeId, includeExtras);
+  if (!resolved) {
+    return { ok: false, note: 'Kon dit recept niet ophalen of niet uitlezen.' };
+  }
+
+  const added: unknown[] = [];
+  const blocked: unknown[] = [];
+  const unverified: unknown[] = [];
+
+  for (const item of resolved.items) {
+    if (item.verdict === 'blocked') {
+      blocked.push({ articleId: item.articleId, name: item.name, gluten: item.gluten });
+      continue;
+    }
+    addToDraft(
+      ctx.db,
+      ctx.conversationKey,
+      item.articleId,
+      item.name ?? item.articleId,
+      item.quantity,
+      {
+        status: item.verdict,
+        note: String((item.gluten as { reason?: unknown }).reason ?? ''),
+      },
+    );
+    added.push({
+      articleId: item.articleId,
+      name: item.name,
+      brand: item.brand,
+      unitQuantity: item.unitQuantity,
+      quantity: item.quantity,
+      priceCents: item.priceCents,
+    });
+    if (item.verdict === 'unverified') {
+      unverified.push({ articleId: item.articleId, name: item.name });
+    }
+  }
+
+  return {
+    ok: true,
+    recipe: resolved.recipe,
+    added,
+    ...(blocked.length > 0
+      ? {
+          blockedByGlutenGuard: blocked,
+          glutenNote:
+            'Deze ingrediënten bevatten gluten en zijn NIET toegevoegd. Noem ze bij naam ' +
+            'en stel een glutenvrij alternatief voor, of raad het recept af.',
+        }
+      : {}),
+    ...(unverified.length > 0
+      ? {
+          unverified,
+          unverifiedNote:
+            'Deze producten konden niet op gluten geverifieerd worden. Noem ze expliciet ' +
+            'bij naam in je antwoord.',
+        }
+      : {}),
+    ...(resolved.skippedNoArticle > 0
+      ? {
+          skippedNoArticle: resolved.skippedNoArticle,
+          skippedNote:
+            'Voor deze ingrediënten gaf Picnic geen product. Zoek ze zelf op met ' +
+            'search_picnic_products en vraag de gebruiker om te kiezen.',
+        }
+      : {}),
+    brandCheckReminder:
+      'Controleer de merken hierboven tegen de Brands-sectie van het huishoudprofiel. ' +
+      'Picnic kiest zelf een merk; de voorkeur van het huishouden gaat vóór. Stel een ' +
+      'wissel voor waar dat afwijkt (remove_from_draft + search_picnic_products + add_to_draft).',
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────

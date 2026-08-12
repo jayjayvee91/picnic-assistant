@@ -62,11 +62,40 @@ re-promote from `develop`.
 src/
 ├── agent/       Claude agent loop, tool definitions, prompt assembly
 ├── allergen/    Gluten guard: rulebook, decision engine, audit log
+├── recipe/      Recipe sources (Picnic favourites today), parsers, registry
 ├── memory/      SQLite store, household profile, purchase summary
 ├── picnic/      Picnic API adapter (decided in Step 2: MRVDH direct or mcp-picnic sidecar)
 ├── scheduler/   Weekly Thursday 20:00 nudge
 └── telegram/    Telegram bot, group chat restriction, /sms /stop /start /status commands
 ```
+
+## Recipes
+
+The assistant plans meals from the household's **saved Picnic recipes**, not
+from invention. `list_recipes` returns the real saved library;
+`add_recipe_to_draft` turns a chosen recipe into draft items.
+
+Picnic hands back a **specific article id per ingredient**, so a recipe resolves
+to real products with no name-guessing — which is what lets the gluten guard and
+brand preferences act exactly rather than approximately.
+
+**Only the pre-selected ingredients are added.** Picnic also lists optional
+pantry extras (oil, cheese, stock) that it leaves unticked. One real recipe:
+15 ingredients at €48.33, of which the 6 pre-selected ones cost €11.80 — adding
+everything would roughly quadruple a week's bill. Pass `includeExtras` to opt in.
+
+Sources live behind a registry, so a personal recipe database can be added later
+without changing the agent tools or the prompt.
+
+```bash
+npm run smoke:recipe    # parser checks against fixtures, offline
+npm run verify:recipe   # parse real captured data; --live to fetch fresh
+```
+
+Two upstream notes worth knowing: `picnic-api`'s `getRecipeDetailsPage()` is
+broken (it requests a page id Picnic has retired), and the meals landing page
+only carries preview carousels capped at ~12–20 recipes. Both are worked around
+in `src/picnic/client.ts`, with the reasons documented there.
 
 ## Gluten guard (coeliac safety)
 
