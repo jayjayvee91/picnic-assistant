@@ -243,7 +243,12 @@ Run against the real account, end to end. Total API cost of all testing: ~€0.6
 
 **Why deferred:** the right fix depends on the actual unverified rate against the household's real basket, which we cannot know until the guard has run over a few live weekly drafts. Tuning now would be guessing. **Revisit after the first 2–3 real orders** — check what fraction of items land `unverified` and whether the grouping alone keeps it tolerable.
 
-**First measurement (Step 13, 20 real articles):** 45% → 25% after tuning the conclusion logic and the seed rulebook. Every remaining unverified item was loose fresh produce with no label to read, so rulebook changes cannot improve it further — the only lever left is standing overrides for staples that reappear weekly. 25% is workable but not comfortable; `verify:allergen` now reports this number directly, so re-measure on a full weekly basket before deciding whether to build anything.
+**Measured and resolved (Step 13, 20 real articles).** Three stages:
+1. 45% unverified — logic too cautious.
+2. 25% after tuning the conclusion logic and seed rulebook. Every remaining case was unlabelled fresh produce, so no rulebook change could improve it further.
+3. **5% after the household confirmed four produce items once**, via `remember_products_as_safe`. Allowed rose 60% → 80%; blocked stayed at 15%, i.e. remembering cleared exactly the produce and left every genuinely gluten-containing product blocked.
+
+That is low enough that each remaining warning still means something, which was the goal. The lever turned out to be the one this entry predicted — standing overrides — so no further work is needed here unless a real weekly basket behaves differently. `verify:allergen` reports the number directly and lists what has been remembered.
 
 ### Allergen guard — contains vs. traces precision
 **The problem:** the upstream library flattens Picnic's "Bevat" (contains) and "Bevat mogelijk" (traces) into a single `allergens` array and discards the headings, and the structured type that preserves the split (`Article.allergies`) is not reachable from any service method.
