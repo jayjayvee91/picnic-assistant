@@ -780,10 +780,22 @@ async function handleListRecipes(
   const { recipes, failures } = await ctx.recipes.listRecipes({ savedOnly: true });
   const filtered = query ? recipes.filter((r) => r.name.toLowerCase().includes(query)) : recipes;
 
+  const shown = filtered.slice(0, limit);
   return {
     total: recipes.length,
     matched: filtered.length,
-    recipes: filtered.slice(0, limit).map((r) => ({ id: r.id, name: r.name, source: r.source })),
+    returned: shown.length,
+    // Without this the model announces the total and then prints one page,
+    // e.g. "here are your 95 saved recipes" above a list of 40.
+    ...(shown.length < filtered.length
+      ? {
+          truncated: true,
+          truncationNote:
+            `Je ziet ${shown.length} van de ${filtered.length} recepten. Zeg dat er meer ` +
+            'zijn; beweer niet dat dit de hele lijst is. Gebruik query of limit voor de rest.',
+        }
+      : {}),
+    recipes: shown.map((r) => ({ id: r.id, name: r.name, source: r.source })),
     // Surfaced rather than swallowed: if a source is down the household should
     // hear "I couldn't reach X" instead of a silently shorter list.
     ...(failures.length > 0 ? { unavailableSources: failures } : {}),
