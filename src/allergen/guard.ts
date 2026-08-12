@@ -61,7 +61,13 @@ import { matchRules, normaliseText, type GlutenRulebook, type RuleMatch } from '
 export type GlutenVerdict = 'blocked' | 'allowed' | 'unverified';
 
 /** Which layer produced the verdict. Mirrors `allergen_decisions.decided_by`. */
-export type DecidedBy = 'override' | 'picnic_allergens' | 'rulebook' | 'no_data' | 'exception';
+export type DecidedBy =
+  | 'override'
+  | 'picnic_allergens'
+  | 'gluten_free_claim'
+  | 'rulebook'
+  | 'no_data'
+  | 'exception';
 
 export interface GlutenDecision {
   verdict: GlutenVerdict;
@@ -172,6 +178,28 @@ export function evaluateGluten(input: EvaluateGlutenInput): GlutenDecision {
     };
   }
 
+  // ── Layer 1b: an explicit gluten-free claim ────────────────────────
+  // A product called "De Cecco gnocchi glutenvrij" being reported as
+  // "unverified" is absurd on its face, and absurd-looking warnings are how a
+  // safety feature loses the household's attention. In the EU a "glutenvrij"
+  // claim is regulated (<20 ppm), so it is real evidence, not marketing.
+  //
+  // Deliberately placed AFTER the block check: if Picnic's allergen list says
+  // gluten while the name claims otherwise, the data contradicts itself and we
+  // keep the block. A claim can promote unknown → allowed; it can never
+  // overturn a declaration of presence.
+  const claim = findGlutenFreeClaim(details, ingredientsText);
+  if (claim) {
+    return {
+      verdict: 'allowed',
+      decidedBy: 'gluten_free_claim',
+      reason: `Dit product is expliciet als glutenvrij aangeduid (${claim}).`,
+      matchedTerms: [],
+      allergens,
+      ingredientsText,
+    };
+  }
+
   // ── Layer 2: your rulebook against the ingredient declaration ──────
   if (ingredientsText !== null && ingredientsText.length > 0) {
     const matches = matchRules(ingredientsText, rulebook);
@@ -256,6 +284,41 @@ export function applyException(decision: GlutenDecision, acknowledgement: string
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Look for an explicit gluten-free claim on the product itself.
+ *
+ * Checked against the product name, brand and the highlights Picnic shows on
+ * the page — not just the ingredient text, because the claim usually lives in
+ * the name ("… glutenvrij") rather than in the declaration.
+ *
+ * Returns the phrase that matched, so the reason string can quote it.
+ */
+function findGlutenFreeClaim(
+  details: ProductDetails,
+  ingredientsText: string | null,
+): string | null {
+  const haystacks: string[] = [];
+  const d = details as unknown as Record<string, unknown>;
+  for (const key of ['name', 'brand', 'description']) {
+    const v = d[key];
+    if (typeof v === 'string') haystacks.push(v);
+  }
+  if (Array.isArray(d['highlights'])) {
+    for (const h of d['highlights']) if (typeof h === 'string') haystacks.push(h);
+  }
+  if (ingredientsText) haystacks.push(ingredientsText);
+
+  for (const text of haystacks) {
+    const normalised = normaliseText(text);
+    // "bevat gluten" must not be read as a gluten-FREE claim, so require the
+    // free-form spellings specifically.
+    if (/\bglutenvrij\w*\b/.test(normalised) || /\bgluten free\b/.test(normalised)) {
+      return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    }
+  }
+  return null;
+}
 
 /** True if an allergen label refers to gluten or a gluten-bearing grain. */
 function mentionsGluten(allergen: string): boolean {

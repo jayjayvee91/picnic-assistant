@@ -135,7 +135,13 @@ export function parseRulebook(markdown: string): GlutenRulebook {
 
   let current: RuleSection | typeof NOTES_SECTION | null = null;
 
-  for (const rawLine of markdown.split('\n')) {
+  // Strip HTML comment blocks BEFORE parsing. Without this, a commented-out
+  // bullet is still read as a live rule — which would silently reinstate terms
+  // the household deliberately disabled, and a gluten rulebook that quietly
+  // does the opposite of what the file says is worse than no comments at all.
+  const withoutComments = markdown.replace(/<!--[\s\S]*?-->/g, '');
+
+  for (const rawLine of withoutComments.split('\n')) {
     const line = rawLine.trim();
 
     const heading = /^#{1,6}\s+(.*)$/.exec(line);
@@ -379,11 +385,23 @@ bij het matchen.
 ## Twijfel
 
 - gemodificeerd zetmeel — bron staat er niet altijd bij
-- zetmeel — alleen als de bron ontbreekt
-- aroma — kan gerstemout bevatten
 - dextrine
 - bindmiddel
 - bouillon — bevat vaak tarwe
+
+<!--
+Bewust NIET in deze lijst, omdat ze in bijna elk product voorkomen en dan
+alles als "niet geverifieerd" markeren — waardoor je de waarschuwingen niet
+meer leest:
+
+- "aroma"  — staat op heel veel etiketten; zelden gluten
+- "zetmeel" — meestal maïs- of aardappelzetmeel; "gemodificeerd zetmeel"
+  hierboven dekt het echte twijfelgeval
+
+Wil je toch maximale voorzichtigheid? Zet ze er dan zelf bij. Reken op veel
+meer meldingen.
+-->
+
 
 ## Veilig
 

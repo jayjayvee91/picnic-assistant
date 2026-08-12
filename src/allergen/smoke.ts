@@ -163,6 +163,85 @@ check(
 );
 
 // ──────────────────────────────────────────────────────────────────────
+// Layer 1b — explicit gluten-free claims
+// ──────────────────────────────────────────────────────────────────────
+//
+// A live run reported "De Cecco gnocchi glutenvrij" as unverified. An absurd
+// warning teaches the household to ignore warnings, so a regulated
+// gluten-free claim now counts as evidence.
+
+console.log('\nLayer 1b: gluten-free claims');
+
+const claimed = evaluateGluten({
+  details: product({ allergens: [], ingredients: null, name: 'De Cecco gnocchi glutenvrij' }),
+  rulebook: RULES,
+});
+check('a "glutenvrij" product name is allowed', claimed.verdict === 'allowed', claimed.reason);
+check('the claim is attributed as such', claimed.decidedBy === 'gluten_free_claim');
+
+check(
+  'an English "gluten free" claim also counts',
+  evaluateGluten({
+    details: product({ allergens: [], ingredients: null, name: 'Schar bread gluten free' }),
+    rulebook: RULES,
+  }).verdict === 'allowed',
+);
+
+// The safety-critical half: a claim may promote unknown to allowed, but must
+// never overturn a declaration that gluten IS present.
+const contradictory = evaluateGluten({
+  details: product({
+    allergens: ['Gluten'],
+    ingredients: 'tarwebloem',
+    name: 'Nepmerk glutenvrij brood',
+  }),
+  rulebook: RULES,
+});
+check(
+  'a declared allergen still beats a gluten-free claim',
+  contradictory.verdict === 'blocked',
+  contradictory.reason,
+);
+
+check(
+  'a rulebook block still beats a gluten-free claim',
+  evaluateGluten({
+    details: product({ allergens: ['Melk'], ingredients: 'gerstemout' }),
+    rulebook: RULES,
+  }).verdict === 'blocked',
+);
+
+check(
+  '"bevat gluten" is not misread as a gluten-free claim',
+  evaluateGluten({
+    details: product({ allergens: [], ingredients: 'bevat gluten', name: 'Gewoon brood' }),
+    rulebook: RULES,
+  }).verdict !== 'allowed',
+);
+
+// ──────────────────────────────────────────────────────────────────────
+// Rulebook comments
+// ──────────────────────────────────────────────────────────────────────
+
+console.log('\nRulebook comments');
+const commented = parseRulebook(`
+## Bevat gluten
+- tarwe
+
+<!--
+Deliberately disabled:
+- aroma
+- zetmeel
+-->
+`);
+check('HTML-commented bullets are not read as rules', commented.contains.length === 1);
+check(
+  'a disabled term does not silently come back',
+  !commented.contains.includes('aroma') && !commented.doubtful.includes('aroma'),
+  JSON.stringify(commented),
+);
+
+// ──────────────────────────────────────────────────────────────────────
 // Layer 2 — the rulebook
 // ──────────────────────────────────────────────────────────────────────
 

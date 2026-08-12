@@ -21,6 +21,7 @@
     "smoke:allergen": "tsx src/allergen/smoke.ts",
     "smoke:recipe": "tsx src/recipe/smoke.ts",
     "verify:recipe": "tsx src/recipe/verify.ts",
+    "verify:allergen": "tsx src/allergen/verify.ts",
     "capture:recipes": "tsx src/picnic/capture-recipes.ts",
     "capture:inspect": "tsx src/picnic/inspect-capture.ts",
     "capture:probe": "tsx src/picnic/probe-recipe.ts",
