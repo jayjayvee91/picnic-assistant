@@ -16,9 +16,13 @@
 
 name: CI
 
+# Feature branches are covered by `pull_request`, so they are deliberately not
+# listed under `push` — otherwise every commit on an open PR runs the whole
+# suite twice against the identical tree, doubling the wait and leaving two
+# indistinguishable "check" entries in the PR's status list.
 on:
   push:
-    branches: [main, develop, 'claude/**']
+    branches: [main, develop]
   pull_request:
 
 permissions:
