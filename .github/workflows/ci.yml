@@ -1,0 +1,61 @@
+# Continuous checks for every push and pull request.
+#
+# Scope: this runs only what is genuinely offline. `smoke:allergen` and
+# `smoke:recipe` are fixture-driven and touch no network, no Picnic session and
+# no API key, so they need no secrets and cannot spend money.
+#
+# Deliberately NOT here:
+#   - `smoke:agent` — an interactive REPL that needs real credentials.
+#   - `verify:allergen` / `verify:recipe` — these check the parsers and the
+#     gluten guard against live Picnic data, which is exactly what makes them
+#     valuable and exactly why they cannot run here. Two of the gluten defects
+#     found during development were invisible to fixtures, because the fixtures
+#     encoded the same misunderstanding as the code; only real product data
+#     exposed them. Run those by hand on the VPS before a deploy. Green CI is
+#     evidence that nothing regressed, not that the guard is correct.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 'claude/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` rather than `npm install`: it installs exactly the locked
+      # versions and fails if package-lock.json is out of step with
+      # package.json, so a drifting lockfile is caught here rather than on the
+      # server during a deploy.
+      - run: npm ci --no-audit --no-fund
+
+      - name: Types
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formatting
+        run: npm run format:check
+
+      # The safety-critical suite: ~50 assertions over the gluten guard,
+      # including that "may contain traces" blocks, that a doubtful term is
+      # never silently allowed, and that a failed product fetch degrades to
+      # unverified rather than allowed.
+      - name: Gluten guard checks
+        run: npm run smoke:allergen
+
+      - name: Recipe parser checks
+        run: npm run smoke:recipe

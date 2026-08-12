@@ -8,4 +8,5 @@
 export { RecipeRegistry } from './registry.js';
 export { PicnicRecipeSource, type PicnicRecipeSourceOptions } from './picnic-source.js';
 export { parseRecipeList, parseRecipeDetails } from './fusion-parse.js';
+export { matchesRecipeQuery, significantWords } from './match.js';
 export type { RecipeSource, RecipeSummary, RecipeDetails, RecipeIngredient } from './types.js';

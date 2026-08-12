@@ -39,6 +39,7 @@ import {
   type CheckResult,
   type RuleSection,
 } from '../allergen/index.js';
+import { matchesRecipeQuery } from '../recipe/index.js';
 import type { RecipeRegistry } from '../recipe/index.js';
 import {
   addToDraft,
@@ -1476,35 +1477,6 @@ function summariseProduct(p: SellingUnit): unknown {
     unit_quantity: obj.unit_quantity ?? null,
     price_cents: obj.display_price ?? obj.price ?? null,
   };
-}
-
-/**
- * Match a recipe name against a search phrase.
- *
- * Every word in the query must appear in the name, in any order, ignoring case
- * and diacritics. A plain substring test was too brittle: asked about
- * "Quinoabowl met bloemkool en pompoen" — the household's own recipe #1 — a
- * query that dropped the filler words matched nothing, and the assistant told
- * them the recipe was not saved. Being wrong in that direction is worse than
- * returning a few extra candidates.
- *
- * Words shorter than two characters are dropped so "en"/"met" cannot decide a
- * match on their own.
- */
-function matchesRecipeQuery(name: string, query: string): boolean {
-  const normalise = (value: string): string =>
-    value
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase();
-
-  const haystack = normalise(name);
-  const words = normalise(query)
-    .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 1);
-
-  if (words.length === 0) return true;
-  return words.every((w) => haystack.includes(w));
 }
 
 function requireString(input: Record<string, unknown>, key: string): string {
