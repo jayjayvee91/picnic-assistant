@@ -230,6 +230,30 @@ export function evaluateGluten(input: EvaluateGlutenInput): GlutenDecision {
     }
   }
 
+  // ── Layer 2b: built-in gluten grains, independent of the rulebook ──
+  // The rulebook is for TUNING; it must not be load-bearing for the basics.
+  // A household could delete a term, ship an empty file, or simply never have
+  // added "gluten" itself — and before this check, ingredient text reading
+  // literally "bevat gluten" was allowed through when the rulebook happened
+  // not to list that word.
+  //
+  // This matters far more now that a clean ingredient list yields `allowed`
+  // rather than `unverified`: that conclusion is only safe if a gluten grain
+  // in the text is reliably caught first, whatever the rulebook says.
+  if (ingredientsText !== null && ingredientsText.length > 0) {
+    const builtIn = findBuiltInGlutenGrain(ingredientsText);
+    if (builtIn) {
+      return {
+        verdict: 'blocked',
+        decidedBy: 'rulebook',
+        reason: `Ingrediënten bevatten "${builtIn}" — een glutenbron.`,
+        matchedTerms: [builtIn],
+        allergens,
+        ingredientsText,
+      };
+    }
+  }
+
   // ── Layer 3: conclusion ────────────────────────────────────────────
   // A non-empty allergen list means Picnic actively declared allergens for
   // this product. Gluten being absent from that list is therefore meaningful,
@@ -247,16 +271,47 @@ export function evaluateGluten(input: EvaluateGlutenInput): GlutenDecision {
     };
   }
 
-  // Empty allergen list is ambiguous: it can mean "no allergens" or "no data".
-  // We cannot tell the two apart, so we do not claim safety.
+  // A COMPLETE ingredient declaration with no gluten source in it is itself
+  // proof, not a gap. EU labelling law (FIC 1169/2011) requires cereals
+  // containing gluten to be named and emphasised inside the ingredient list,
+  // so "full list, no gluten grain" is exactly how a human reads a packet.
+  //
+  // This was previously `unverified`, on the reasoning that an empty allergen
+  // block is ambiguous. Real data showed the cost of that caution: products
+  // like "Bio quinoa", "Bio pompoenblokjes" and "Ras el hanout" all carry a
+  // complete ingredient list and no allergens, and calling them unverified
+  // pushed the flag rate high enough that the household would stop reading
+  // flags at all — which would defeat the guard far more thoroughly than this
+  // does.
+  //
+  // The safety of this rests on the blocking term list being reasonably
+  // complete, which is why `gluten-rules.md` ships the gluten grains
+  // explicitly and is editable.
+  if (ingredientsText !== null && ingredientsText.length > 0) {
+    return {
+      verdict: 'allowed',
+      decidedBy: 'rulebook',
+      reason:
+        'De volledige ingrediëntenlijst bevat geen enkele glutenbron. ' +
+        'Picnic vermeldt ook geen gluten als allergeen.',
+      matchedTerms: [],
+      allergens,
+      ingredientsText,
+    };
+  }
+
+  // No ingredient list AND no allergen list. Overwhelmingly this is loose
+  // fresh produce — a single vegetable has no declaration because it IS the
+  // ingredient. We still refuse to claim safety (an unlabelled processed
+  // product would look identical), but the wording says what is actually
+  // going on rather than implying something alarming.
   return {
     verdict: 'unverified',
     decidedBy: 'no_data',
-    reason: ingredientsText
-      ? 'Picnic geeft geen allergeneninformatie voor dit product. De ingrediënten ' +
-        'bevatten geen bekende glutenterm, maar dat is geen garantie — controleer zelf.'
-      : 'Picnic geeft geen allergenen- of ingrediënteninformatie voor dit product. ' +
-        'Glutenstatus onbekend; controleer zelf.',
+    reason:
+      'Geen etiketgegevens bij Picnic — geen ingrediënten en geen allergenen. ' +
+      'Dat is normaal bij losse verse producten (groente, fruit), maar het ' +
+      'blijft onbevestigd.',
     matchedTerms: [],
     allergens,
     ingredientsText,
@@ -284,6 +339,51 @@ export function applyException(decision: GlutenDecision, acknowledgement: string
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Gluten grains checked against the INGREDIENT TEXT regardless of the
+ * household's rulebook. Deliberately narrower than the rulebook: these are
+ * unambiguous cereal names, not judgement calls.
+ *
+ * `haver` is absent on purpose. Oats are gluten-free by nature but frequently
+ * cross-contaminated, so blocking every product mentioning them would be very
+ * aggressive; Picnic declaring "Haver" as an allergen still blocks at layer 1,
+ * and a household wanting the stricter reading can add it to their rulebook.
+ */
+const BUILT_IN_GLUTEN_GRAINS = [
+  'gluten',
+  'tarwe',
+  'spelt',
+  'gerst',
+  'rogge',
+  'mout',
+  'seitan',
+  'couscous',
+  'bulgur',
+  'griesmeel',
+  'paneermeel',
+  'kamut',
+  'durum',
+  'panko',
+  'triticale',
+  'einkorn',
+  'farro',
+  'khorasan',
+];
+
+/**
+ * Find a built-in gluten grain in the ingredient text, ignoring gluten-FREE
+ * wording so "glutenvrije bloem" does not match on "gluten".
+ */
+function findBuiltInGlutenGrain(ingredientsText: string): string | null {
+  // Strip free-from wording first, so its "gluten" substring cannot match.
+  const normalised = normaliseText(ingredientsText).replace(/glutenvrij\w*/g, ' ');
+  for (const grain of BUILT_IN_GLUTEN_GRAINS) {
+    // Word-start match, allowing Dutch compounds ("tarwebloem", "gerstemout").
+    if (new RegExp(`(^|\\s)${grain}`).test(normalised)) return grain;
+  }
+  return null;
+}
 
 /**
  * Look for an explicit gluten-free claim on the product itself.

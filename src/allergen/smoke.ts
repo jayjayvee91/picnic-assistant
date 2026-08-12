@@ -280,14 +280,19 @@ const noDetails = evaluateGluten({ details: null, rulebook: RULES });
 check('a failed fetch is unverified', noDetails.verdict === 'unverified', noDetails.reason);
 check('a failed fetch is never allowed', noDetails.verdict !== 'allowed');
 
-const noAllergenData = evaluateGluten({
-  details: product({ allergens: [], ingredients: 'water, rijst' }),
+// A COMPLETE ingredient list with no gluten source is proof, not a gap: EU
+// labelling law requires gluten cereals to be named in it. This was once
+// `unverified`, but real data showed that caution flagged ordinary products
+// like "Bio quinoa" and "Ras el hanout", pushing the flag rate high enough
+// that the warnings would stop being read at all.
+const cleanIngredientsNoAllergens = evaluateGluten({
+  details: product({ allergens: [], ingredients: 'water, rijst, zout' }),
   rulebook: RULES,
 });
 check(
-  'empty allergen list is unverified even with clean ingredients',
-  noAllergenData.verdict === 'unverified',
-  noAllergenData.reason,
+  'a clean full ingredient list is allowed even without an allergen block',
+  cleanIngredientsNoAllergens.verdict === 'allowed',
+  cleanIngredientsNoAllergens.reason,
 );
 
 const nothingAtAll = evaluateGluten({
@@ -304,11 +309,36 @@ check(
   }).verdict === 'blocked',
 );
 
+// The rulebook is for tuning, not for supplying the basics. Even with NO
+// rules at all, a gluten grain in the ingredient text must still block —
+// otherwise the "clean list means allowed" conclusion above would be unsafe
+// for any household that edited or emptied their rulebook.
 check(
-  'an empty rulebook degrades to unverified, not allowed',
+  'an empty rulebook still blocks a gluten grain in the ingredients',
   evaluateGluten({
-    details: product({ allergens: [], ingredients: 'tarwebloem' }),
+    details: product({ allergens: [], ingredients: 'tarwebloem, water' }),
     rulebook: EMPTY_RULEBOOK,
+  }).verdict === 'blocked',
+);
+check(
+  'the built-in floor catches "bevat gluten" with no matching rule',
+  evaluateGluten({
+    details: product({ allergens: [], ingredients: 'bevat gluten', name: 'Gewoon brood' }),
+    rulebook: EMPTY_RULEBOOK,
+  }).verdict === 'blocked',
+);
+check(
+  'the built-in floor does not fire on "glutenvrije bloem"',
+  evaluateGluten({
+    details: product({ allergens: ['Melk'], ingredients: 'glutenvrije bloem, rijstmeel' }),
+    rulebook: EMPTY_RULEBOOK,
+  }).verdict === 'allowed',
+);
+check(
+  'a product with no label at all stays unverified',
+  evaluateGluten({
+    details: product({ allergens: [], ingredients: null, name: 'Broccoli' }),
+    rulebook: RULES,
   }).verdict === 'unverified',
 );
 

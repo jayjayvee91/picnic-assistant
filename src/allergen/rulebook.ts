@@ -381,6 +381,16 @@ bij het matchen.
 - orzo — dit is tarwepasta, geen rijst
 - panko
 - gluten
+- triticale — kruising van tarwe en rogge
+- einkorn
+- emmer — oude tarwesoort
+- farro — Italiaanse naam voor emmertarwe
+- khorasan
+- beschuit
+- crouton
+- matze
+- brooddeeg
+- broodkruim
 
 ## Twijfel
 
