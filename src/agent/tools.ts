@@ -1056,9 +1056,18 @@ async function handleAddRecipeToDraft(
     ...(blocked.length > 0
       ? {
           blockedByGlutenGuard: blocked,
+          // The rest of the recipe still goes in, because those ingredients are
+          // fine and the household may want them. But a recipe missing its main
+          // component is a meal that cannot be cooked, and ordering merguez and
+          // spinach with no gnocchi is a worse outcome than adding nothing —
+          // so say plainly that this is unfinished business, not a result.
+          recipeIncomplete: true,
           glutenNote:
-            'Deze ingrediënten bevatten gluten en zijn NIET toegevoegd. Noem ze bij naam ' +
-            'en stel een glutenvrij alternatief voor, of raad het recept af.',
+            `"${resolved.recipe.name ?? 'Dit recept'}" is NIET compleet: ` +
+            `${blocked.length} ingredient(en) bevatten gluten en zijn niet toegevoegd. ` +
+            'Zo is het gerecht niet te koken. Zoek een glutenvrij alternatief met ' +
+            'search_picnic_products en voeg dat toe, of haal de rest van dit recept ' +
+            'weer uit de lijst. Laat dit niet ongemoeid staan tot het vastleggen.',
         }
       : {}),
     ...(unverified.length > 0
