@@ -82,10 +82,22 @@ export interface GlutenDecision {
   ingredientsText: string | null;
 }
 
-/** A human decision for one article, forcing a verdict regardless of the data. */
+/** A human decision for one article. */
 export interface OverrideInput {
   verdict: 'blocked' | 'allowed';
   reason: string;
+  /**
+   * 'correction' — the household filled a gap in Picnic's data ("this loose
+   *   broccoli is fine"). It must NOT survive the guard later finding actual
+   *   gluten, because they corrected an absence of evidence, not a finding.
+   * 'exception'  — the household said "I know this contains gluten and I want
+   *   it anyway". That DOES outrank a block; acknowledging the gluten is
+   *   precisely what the exception is.
+   *
+   * Defaults to 'correction', the safer reading, so an override written before
+   * this distinction existed cannot silently behave as an exception.
+   */
+  kind?: 'correction' | 'exception';
 }
 
 export interface EvaluateGlutenInput {
@@ -135,12 +147,22 @@ export function evaluateGluten(input: EvaluateGlutenInput): GlutenDecision {
   const ingredientsText = details ? extractIngredientsText(details) : null;
 
   // ── Layer 0: human override ────────────────────────────────────────
-  // Deliberately first: a human who has physically read the packet outranks
-  // every heuristic below, in both directions.
-  if (override) {
+  // A human who has physically read the packet outranks every heuristic below
+  // — but not unconditionally, and the asymmetry matters.
+  //
+  // A BLOCKING override always wins: it only ever increases caution.
+  //
+  // An ALLOWING override wins immediately only when it is a deliberate
+  // exception ("I know this has gluten"). A mere correction ("this loose
+  // broccoli is fine") is evaluated against the automatic layers first, and
+  // yields if they find real gluten. Otherwise a product remembered as safe
+  // today would stay safe forever, even after Picnic relabelled it or the
+  // household added a rule that catches it — the override would silently
+  // outrank the very correction meant to fix it.
+  if (override && (override.verdict === 'blocked' || override.kind === 'exception')) {
     return {
       verdict: override.verdict,
-      decidedBy: 'override',
+      decidedBy: override.kind === 'exception' ? 'exception' : 'override',
       reason: override.reason,
       matchedTerms: [],
       allergens,
@@ -265,6 +287,22 @@ export function evaluateGluten(input: EvaluateGlutenInput): GlutenDecision {
       reason:
         `Picnic declareert allergenen (${allergens.join(', ')}) en gluten staat er niet bij` +
         (ingredientsText ? ', en de ingrediënten bevatten geen glutenterm.' : '.'),
+      matchedTerms: [],
+      allergens,
+      ingredientsText,
+    };
+  }
+
+  // ── Layer 2c: an allowing correction, now that nothing blocked ─────
+  // The household said this product is fine. Every automatic layer has run and
+  // found no gluten, so honour it — this is what stops unlabelled produce from
+  // being flagged week after week. Had any layer found gluten, we would never
+  // have reached here, which is exactly the point.
+  if (override && override.verdict === 'allowed') {
+    return {
+      verdict: 'allowed',
+      decidedBy: 'override',
+      reason: override.reason,
       matchedTerms: [],
       allergens,
       ingredientsText,

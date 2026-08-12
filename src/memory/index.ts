@@ -26,6 +26,7 @@ export {
   type AllergenVerdict,
   type OverrideVerdict,
   type OverrideScope,
+  type OverrideKind,
   type AllergenDecisionInput,
   type AllergenDecisionRecord,
   type AllergenOverride,

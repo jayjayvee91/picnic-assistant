@@ -417,6 +417,35 @@ export const AGENT_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'remember_products_as_safe',
+    description:
+      'Remember one or more products as gluten-safe, so they stop being ' +
+      'flagged as unverified in future. Use this for items the user has ' +
+      'confirmed — typically loose fresh produce (broccoli, komkommer, dille) ' +
+      'that carries no label for Picnic to publish, so it would otherwise be ' +
+      'flagged every single week. ' +
+      'OFFER this whenever you show unverified items: ask "zal ik deze ' +
+      'onthouden als veilig?" and call it once they agree. Never call it ' +
+      'without their agreement. Products that the guard BLOCKS cannot be ' +
+      'remembered this way — that needs add_with_gluten_exception.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        articleIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Picnic article ids to remember as safe.',
+        },
+        reason: {
+          type: 'string',
+          description:
+            'Why, in Dutch — e.g. "verse groente zonder etiket, door gebruiker bevestigd".',
+        },
+      },
+      required: ['articleIds', 'reason'],
+    },
+  },
+  {
     name: 'set_product_gluten_override',
     description:
       'Force a verdict for ONE specific article, overriding the automatic ' +
@@ -541,6 +570,8 @@ async function dispatch(
       return handleProposeGlutenRule(ctx, input);
     case 'commit_gluten_rule':
       return await handleCommitGlutenRule(ctx, input);
+    case 'remember_products_as_safe':
+      return await handleRememberProductsAsSafe(ctx, input);
     case 'set_product_gluten_override':
       return handleSetProductGlutenOverride(ctx, input);
 
@@ -1160,6 +1191,9 @@ async function handleAddWithGlutenException(
     allergen: GLUTEN,
     verdict: 'allowed',
     scope,
+    // A deliberate exception, not a correction: the household acknowledged the
+    // gluten, so this one is allowed to outrank a block.
+    kind: 'exception',
     articleName,
     reason: `Bewuste uitzondering door de gebruiker: ${acknowledgement}`,
   });
@@ -1240,6 +1274,74 @@ async function handleCommitGlutenRule(
   };
 }
 
+/**
+ * Remember products as safe so they stop being flagged.
+ *
+ * The household confirms once, and the item stops warning — which is the whole
+ * point. Unlabelled fresh produce has nothing for Picnic to publish, so
+ * without this it is flagged every week forever, and a warning that appears
+ * every week regardless is a warning nobody reads.
+ *
+ * One hard limit: this can never clear a product the guard BLOCKS. Bulk
+ * "remember these as safe" must not become a way to wave through something
+ * with declared gluten in it — a deliberate exception is a separate, explicit
+ * act (`add_with_gluten_exception`) and stays that way.
+ */
+async function handleRememberProductsAsSafe(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const raw = input['articleIds'];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('Tool input "articleIds" must be a non-empty array of article ids.');
+  }
+  const reason = requireString(input, 'reason');
+  const articleIds = raw.filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  const remembered: Array<{ articleId: string; name: string | null }> = [];
+  const refused: Array<{ articleId: string; name: string | null; reason: string }> = [];
+
+  for (const articleId of articleIds) {
+    const check = await ctx.allergen.check(articleId, null);
+    if (check.verdict === 'blocked') {
+      refused.push({
+        articleId,
+        name: check.productName,
+        reason: check.reason,
+      });
+      continue;
+    }
+    upsertAllergenOverride(ctx.db, {
+      articleId,
+      allergen: GLUTEN,
+      verdict: 'allowed',
+      scope: 'standing',
+      kind: 'correction',
+      articleName: check.productName,
+      reason: `Door gebruiker bevestigd als veilig: ${reason}`,
+    });
+    remembered.push({ articleId, name: check.productName });
+  }
+
+  return {
+    ok: refused.length === 0,
+    remembered,
+    ...(refused.length > 0
+      ? {
+          refused,
+          refusedNote:
+            'Deze producten bevatten gluten volgens de controle en kunnen niet als ' +
+            'veilig onthouden worden. Wil de gebruiker er bewust toch één, dan kan dat ' +
+            'alleen via add_with_gluten_exception.',
+        }
+      : {}),
+    note:
+      `${remembered.length} product(en) onthouden als glutenvrij. Ze worden niet meer ` +
+      'gemarkeerd. Dit is terug te draaien — /glutenlog toont alle handmatige ' +
+      'uitzonderingen en correcties.',
+  };
+}
+
 function handleSetProductGlutenOverride(
   ctx: AgentContext,
   input: Record<string, unknown>,
@@ -1256,6 +1358,7 @@ function handleSetProductGlutenOverride(
     allergen: GLUTEN,
     verdict,
     scope: 'standing',
+    kind: 'correction',
     articleName,
     reason,
   });

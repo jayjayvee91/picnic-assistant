@@ -48,6 +48,7 @@ export function openDatabase(dbPath: string): DB {
 
 function migrate(db: DB): void {
   db.exec(SCHEMA);
+  migrateColumns(db);
 }
 
 /**
@@ -169,14 +170,47 @@ CREATE INDEX IF NOT EXISTS idx_allergen_decisions_article
 -- distinguishes a standing rule from a one-off: 'standing' persists, 'once' is
 -- consumed by the next add and then deleted, so a single deliberate exception
 -- cannot silently become permanent.
+-- The kind column separates two very different human acts:
+--   'correction' — "this product is fine / is not fine", based on reading the
+--                  packet. An ALLOWED correction must NOT survive the guard
+--                  later finding actual gluten (a Picnic relabel, a new rule):
+--                  the household corrected a gap in the data, not a finding.
+--   'exception'  — "I know this contains gluten and I want it anyway". This
+--                  one DOES outrank a block, because the human acknowledged
+--                  exactly that.
 CREATE TABLE IF NOT EXISTS product_allergen_overrides (
   article_id   TEXT NOT NULL,
   allergen     TEXT NOT NULL DEFAULT 'gluten',
   verdict      TEXT NOT NULL CHECK (verdict IN ('blocked','allowed')),
   scope        TEXT NOT NULL DEFAULT 'standing' CHECK (scope IN ('standing','once')),
+  kind         TEXT NOT NULL DEFAULT 'correction' CHECK (kind IN ('correction','exception')),
   article_name TEXT,
   reason       TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (article_id, allergen)
 );
 `;
+
+/**
+ * Additive migrations for databases created before a column existed.
+ *
+ * v1 uses `CREATE TABLE IF NOT EXISTS` rather than a migration framework, which
+ * cannot add a column to a table that already exists. Each entry here is
+ * attempted and its "duplicate column" error ignored, which is safe because
+ * every one is additive with a default.
+ */
+function migrateColumns(db: DB): void {
+  const additive = [
+    `ALTER TABLE product_allergen_overrides ADD COLUMN kind TEXT NOT NULL DEFAULT 'correction'`,
+  ];
+  for (const sql of additive) {
+    try {
+      db.exec(sql);
+    } catch (err) {
+      // "duplicate column name" means the migration already ran. Anything else
+      // is a real problem and must not be swallowed.
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(message)) throw err;
+    }
+  }
+}

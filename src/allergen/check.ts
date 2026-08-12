@@ -92,7 +92,9 @@ export class AllergenChecker {
     const decision = evaluateGluten({
       details,
       rulebook,
-      override: override ? { verdict: override.verdict, reason: override.reason } : null,
+      override: override
+        ? { verdict: override.verdict, reason: override.reason, kind: override.kind }
+        : null,
     });
 
     // A one-off override is consumed the moment it is used, so a single

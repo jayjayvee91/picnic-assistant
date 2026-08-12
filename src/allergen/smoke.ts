@@ -360,12 +360,51 @@ check(
 );
 check('override is attributed as such', forcedBlock.decidedBy === 'override');
 
+// A DELIBERATE EXCEPTION outranks a block: the household acknowledged the
+// gluten, which is exactly what the exception is.
 const forcedAllow = evaluateGluten({
   details: product({ allergens: ['Gluten'], ingredients: 'tarwebloem' }),
   rulebook: RULES,
-  override: { verdict: 'allowed', reason: 'Bewust: brood voor huisgenoot zonder coeliakie.' },
+  override: {
+    verdict: 'allowed',
+    kind: 'exception',
+    reason: 'Bewust: brood voor huisgenoot zonder coeliakie.',
+  },
 });
-check('an override can allow a gluten product deliberately', forcedAllow.verdict === 'allowed');
+check('a deliberate exception can allow a gluten product', forcedAllow.verdict === 'allowed');
+
+// A CORRECTION must not. "This loose broccoli is fine" fills a gap in Picnic's
+// data; it is not a statement that gluten found later does not matter. Without
+// this, a product remembered as safe today would stay safe forever, outranking
+// the very rule or relabel meant to correct it.
+const staleCorrection = evaluateGluten({
+  details: product({ allergens: ['Gluten'], ingredients: 'tarwebloem' }),
+  rulebook: RULES,
+  override: { verdict: 'allowed', kind: 'correction', reason: 'Ooit als veilig onthouden.' },
+});
+check(
+  'an allowing CORRECTION does not survive a later gluten finding',
+  staleCorrection.verdict === 'blocked',
+  staleCorrection.reason,
+);
+check(
+  'an override with no kind defaults to the safer correction reading',
+  evaluateGluten({
+    details: product({ allergens: ['Gluten'], ingredients: 'tarwebloem' }),
+    rulebook: RULES,
+    override: { verdict: 'allowed', reason: 'Oude override zonder kind.' },
+  }).verdict === 'blocked',
+);
+// But a correction still does its job when nothing else objects — this is what
+// stops unlabelled produce being flagged every week.
+check(
+  'an allowing correction clears an otherwise unverified product',
+  evaluateGluten({
+    details: product({ allergens: [], ingredients: null, name: 'Broccoli' }),
+    rulebook: RULES,
+    override: { verdict: 'allowed', kind: 'correction', reason: 'Verse groente, bevestigd.' },
+  }).verdict === 'allowed',
+);
 
 const exception = applyException(declaredGluten, 'ja, ik weet dat hier gluten in zit');
 check('applyException flips a block to allowed', exception.verdict === 'allowed');
@@ -567,6 +606,45 @@ await (async (): Promise<void> => {
     'optional pantry extras are excluded by default',
     draftAfterRecipe.length === 1,
     `draft had ${draftAfterRecipe.length} items`,
+  );
+
+  // ── Remembering products as safe ───────────────────────────────────
+  // Unlabelled produce would otherwise be flagged every week forever. The
+  // household confirms once and it stops — but this must never become a bulk
+  // route around a real block.
+  emptyDraft(db, 'smoke');
+  const remembered = await call('remember_products_as_safe', {
+    articleIds: ['rijst', 'glutenbrood'],
+    reason: 'verse groente, door gebruiker bevestigd',
+  });
+  check(
+    'remembering a clean product succeeds',
+    Array.isArray(remembered['remembered']) &&
+      (remembered['remembered'] as Array<{ articleId: string }>).some(
+        (r) => r.articleId === 'rijst',
+      ),
+  );
+  check(
+    'a BLOCKED product cannot be remembered as safe',
+    Array.isArray(remembered['refused']) &&
+      (remembered['refused'] as Array<{ articleId: string }>).some(
+        (r) => r.articleId === 'glutenbrood',
+      ),
+    JSON.stringify(remembered),
+  );
+
+  // The remembered product must now pass without a warning, and the blocked
+  // one must still be blocked.
+  const afterRemember = await call('add_to_draft', { articleId: 'rijst', articleName: 'Rijst' });
+  check(
+    'a remembered product is no longer flagged',
+    (afterRemember['gluten'] as { verdict?: string } | undefined)?.verdict === 'allowed',
+  );
+  check(
+    'the refused product is still blocked afterwards',
+    (await call('add_to_draft', { articleId: 'glutenbrood', articleName: 'Brood' }))[
+      'blockedByGlutenGuard'
+    ] === true,
   );
 
   // A commit must refuse outright if any item is blocked. Seed the draft with a

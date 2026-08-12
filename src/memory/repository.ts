@@ -370,6 +370,12 @@ export function appendChatTurn(db: DB, turn: ChatTurnInput): void {
 export type AllergenVerdict = 'blocked' | 'allowed' | 'unverified';
 export type OverrideVerdict = 'blocked' | 'allowed';
 export type OverrideScope = 'standing' | 'once';
+/**
+ * 'correction' fixes a gap in Picnic's data; an ALLOWED correction must not
+ * survive the guard later finding real gluten. 'exception' is a human saying
+ * "I know this has gluten and want it anyway", which does outrank a block.
+ */
+export type OverrideKind = 'correction' | 'exception';
 
 export interface AllergenDecisionInput {
   articleId: string;
@@ -461,6 +467,7 @@ export interface AllergenOverride {
   allergen: string;
   verdict: OverrideVerdict;
   scope: OverrideScope;
+  kind: OverrideKind;
   articleName: string | null;
   reason: string;
   createdAt: string;
@@ -473,7 +480,7 @@ export function getAllergenOverride(
 ): AllergenOverride | null {
   const row = db
     .prepare(
-      `SELECT article_id, allergen, verdict, scope, article_name, reason, created_at
+      `SELECT article_id, allergen, verdict, scope, kind, article_name, reason, created_at
        FROM product_allergen_overrides WHERE article_id = ? AND allergen = ?`,
     )
     .get(articleId, allergen) as
@@ -482,6 +489,7 @@ export function getAllergenOverride(
         allergen: string;
         verdict: OverrideVerdict;
         scope: OverrideScope;
+        kind: OverrideKind;
         article_name: string | null;
         reason: string;
         created_at: string;
@@ -493,6 +501,7 @@ export function getAllergenOverride(
     allergen: row.allergen,
     verdict: row.verdict,
     scope: row.scope,
+    kind: row.kind,
     articleName: row.article_name,
     reason: row.reason,
     createdAt: row.created_at,
@@ -505,11 +514,12 @@ export function upsertAllergenOverride(
 ): void {
   db.prepare(
     `INSERT INTO product_allergen_overrides
-       (article_id, allergen, verdict, scope, article_name, reason)
-     VALUES (?, ?, ?, ?, ?, ?)
+       (article_id, allergen, verdict, scope, kind, article_name, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(article_id, allergen) DO UPDATE SET
        verdict      = excluded.verdict,
        scope        = excluded.scope,
+       kind         = excluded.kind,
        article_name = excluded.article_name,
        reason       = excluded.reason,
        created_at   = datetime('now')`,
@@ -518,6 +528,7 @@ export function upsertAllergenOverride(
     override.allergen,
     override.verdict,
     override.scope,
+    override.kind,
     override.articleName,
     override.reason,
   );
@@ -534,7 +545,7 @@ export function deleteAllergenOverride(db: DB, articleId: string, allergen = 'gl
 export function listAllergenOverrides(db: DB, limit = 50): AllergenOverride[] {
   const rows = db
     .prepare(
-      `SELECT article_id, allergen, verdict, scope, article_name, reason, created_at
+      `SELECT article_id, allergen, verdict, scope, kind, article_name, reason, created_at
        FROM product_allergen_overrides ORDER BY created_at DESC LIMIT ?`,
     )
     .all(limit) as Array<{
@@ -542,6 +553,7 @@ export function listAllergenOverrides(db: DB, limit = 50): AllergenOverride[] {
     allergen: string;
     verdict: OverrideVerdict;
     scope: OverrideScope;
+    kind: OverrideKind;
     article_name: string | null;
     reason: string;
     created_at: string;
@@ -551,6 +563,7 @@ export function listAllergenOverrides(db: DB, limit = 50): AllergenOverride[] {
     allergen: r.allergen,
     verdict: r.verdict,
     scope: r.scope,
+    kind: r.kind,
     articleName: r.article_name,
     reason: r.reason,
     createdAt: r.created_at,
