@@ -6,6 +6,7 @@ export { openDatabase, type DB } from './db.js';
 export {
   recordOrder,
   getRecentOrders,
+  getNewestOrderCreationTime,
   searchOrderHistory,
   logSuggestion,
   getLatestSuggestion,
@@ -44,6 +45,7 @@ export {
   type TypicalBasketEntry,
 } from './summary.js';
 export { runBootstrap, type BootstrapOptions, type BootstrapResult } from './bootstrap.js';
+export { syncRecentOrders, type SyncOptions, type SyncResult } from './sync.js';
 export { backupDatabase, type BackupOptions, type BackupResult } from './backup.js';
 export {
   loadProfile,

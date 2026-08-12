@@ -22,9 +22,10 @@
  *     caller can decide whether to re-run.
  */
 
-import type { Delivery, DeliveryDetail, PicnicClient } from '../picnic/index.js';
+import type { PicnicClient } from '../picnic/index.js';
 import type { DB } from './db.js';
-import { recordOrder, getMeta, setMeta, type OrderRecord } from './repository.js';
+import { flattenDelivery } from './flatten.js';
+import { recordOrder, getMeta, setMeta } from './repository.js';
 import { recomputeAndStoreSummary } from './summary.js';
 
 const BOOTSTRAP_FLAG = 'bootstrap_completed';
@@ -135,64 +136,6 @@ export async function runBootstrap(
     windowStart: windowStart.toISOString(),
     windowEnd: windowEnd.toISOString(),
   };
-}
-
-/**
- * Translate a Picnic `DeliveryDetail` into our internal `OrderRecord`s.
- * A Delivery usually contains exactly one Order; we still handle N for safety.
- *
- * For each `OrderLine`, Picnic represents quantity by repeating the
- * `OrderArticle` in `items[]` (e.g. ordering 3 cartons → 3 entries). We
- * collapse this to `{ articleId, quantity, ... }` in our schema.
- */
-function flattenDelivery(detail: DeliveryDetail, slim: Delivery): OrderRecord[] {
-  const windowStart = slim.slot?.window_start ?? null;
-  const windowEnd = slim.slot?.window_end ?? null;
-
-  return detail.orders.map((order) => {
-    const byArticle = new Map<
-      string,
-      { name: string; unitQuantity: string | null; quantity: number; pricePerArticleCents: number }
-    >();
-
-    for (const line of order.items) {
-      const articles = line.items ?? [];
-      for (const article of articles) {
-        const existing = byArticle.get(article.id);
-        if (existing) {
-          existing.quantity += 1;
-        } else {
-          byArticle.set(article.id, {
-            name: article.name,
-            unitQuantity: article.unit_quantity ?? null,
-            quantity: 1,
-            // Picnic's `price` on the article is per-unit in cents.
-            pricePerArticleCents: article.price ?? 0,
-          });
-        }
-      }
-    }
-
-    const items = [...byArticle.entries()].map(([articleId, info]) => ({
-      articleId,
-      articleName: info.name,
-      unitQuantity: info.unitQuantity,
-      quantity: info.quantity,
-      priceCents: info.pricePerArticleCents,
-    }));
-
-    return {
-      orderId: order.id,
-      deliveryId: slim.delivery_id,
-      creationTime: order.creation_time,
-      deliveryWindowStart: windowStart,
-      deliveryWindowEnd: windowEnd,
-      status: order.status,
-      totalPriceCents: order.total_price ?? 0,
-      totalSavingsCents: order.total_savings ?? 0,
-      items,
-    };
-  });
 }
 
 function sleep(ms: number): Promise<void> {
