@@ -787,6 +787,16 @@ async function handleListRecipes(
     // Surfaced rather than swallowed: if a source is down the household should
     // hear "I couldn't reach X" instead of a silently shorter list.
     ...(failures.length > 0 ? { unavailableSources: failures } : {}),
+    // A live run showed the model annotating this list with guessed verdicts
+    // ("pasta = gluten") from its own knowledge, with no tool call behind them.
+    // Gluten-free pasta and gnocchi exist and this household buys them, so the
+    // guesses were both wrong and costly — and mixing them in with real
+    // verdicts makes the real ones look like guesses too.
+    glutenNote:
+      'Deze lijst bevat GEEN glutenoordelen. Namen zeggen niets: er bestaat ' +
+      'glutenvrije pasta, gnocchi en noedels. Annoteer deze recepten niet met ' +
+      'vermoedens — roep get_recipe_details aan als iemand wil weten of een ' +
+      'recept veilig is.',
   };
 }
 
