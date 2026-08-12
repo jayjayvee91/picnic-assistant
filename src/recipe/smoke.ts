@@ -10,6 +10,7 @@
  */
 
 import { parseRecipeList, parseRecipeDetails } from './fusion-parse.js';
+import { matchesRecipeQuery, significantWords } from './match.js';
 import { RecipeRegistry } from './registry.js';
 import type { RecipeDetails, RecipeSource, RecipeSummary } from './types.js';
 
@@ -417,6 +418,54 @@ const degraded = new RecipeRegistry([
 const partial = await degraded.listRecipes();
 check('one failing source does not lose the others', partial.recipes.length === 1);
 check('the failure is reported, not swallowed', partial.failures[0]?.source === 'broken');
+
+// ──────────────────────────────────────────────────────────────────────
+// Recipe name matching
+//
+// This is the one piece of recipe logic that has already shipped a defect in
+// front of the household: a substring match meant a query for their own saved
+// recipe returned nothing, and the assistant stated the recipe was not saved.
+// Being confidently wrong in that direction is the failure mode these checks
+// exist to prevent, so most of them assert that a reasonable query still finds
+// a recipe rather than that a bad one is excluded.
+// ──────────────────────────────────────────────────────────────────────
+
+const QUINOA = 'Quinoabowl met bloemkool en pompoen';
+
+check('exact name matches', matchesRecipeQuery(QUINOA, QUINOA));
+check('a single distinctive word matches', matchesRecipeQuery(QUINOA, 'quinoabowl'));
+check('word order does not matter', matchesRecipeQuery(QUINOA, 'pompoen bloemkool'));
+check('matching ignores case', matchesRecipeQuery(QUINOA, 'QUINOABOWL'));
+check(
+  'a word the name does not contain excludes it',
+  !matchesRecipeQuery(QUINOA, 'quinoabowl kip'),
+);
+
+// The regression that prompted all of this. Filler words must not be able to
+// veto a match: every significant word is mandatory, so leaving "met" and "en"
+// in the query would require them to appear in the title as well.
+check('filler words do not veto a match', matchesRecipeQuery(QUINOA, 'recept met pompoen'));
+check(
+  'filler words are dropped before matching',
+  JSON.stringify(significantWords('recept met pompoen')) === JSON.stringify(['pompoen']),
+  JSON.stringify(significantWords('recept met pompoen')),
+);
+check(
+  'a title word that is also filler is still findable',
+  matchesRecipeQuery('Soep van de dag', 'soep dag'),
+);
+
+// Diacritics: the household's recipes are Dutch, but Picnic titles carry
+// French and Italian loan words with accents that nobody types into a chat.
+check('diacritics in the name are ignored', matchesRecipeQuery('Kaassoufflé', 'kaassouffle'));
+check('diacritics in the query are ignored', matchesRecipeQuery('Kaassouffle', 'kaassoufflé'));
+
+// Degenerate queries resolve towards showing everything, never towards an
+// empty result that reads as "you have no such recipe".
+check('an empty query matches', matchesRecipeQuery(QUINOA, ''));
+check('a punctuation-only query matches', matchesRecipeQuery(QUINOA, '???'));
+check('a query of nothing but filler matches', matchesRecipeQuery(QUINOA, 'het recept van de'));
+check('single characters cannot decide a match', matchesRecipeQuery(QUINOA, 'a'));
 
 // ──────────────────────────────────────────────────────────────────────
 

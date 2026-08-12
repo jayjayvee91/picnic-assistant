@@ -214,6 +214,15 @@ Run against the real account, end to end. Total API cost of all testing: ~€0.6
 
 ---
 
+### Step 14 — Continuous checks ✅
+🟩 `.github/workflows/ci.yml` runs types, lint, formatting, `smoke:allergen` and `smoke:recipe` on every push and PR. Both suites are fixture-driven and touch no network, session or API key, so CI needs no secrets and cannot spend money. Before this, ~1,100 lines of assertions existed but ran only when someone remembered to type the command — a regression in the gluten guard would have reached the VPS unannounced.
+
+🟩 **What CI deliberately does not run:** `smoke:agent` (interactive, needs credentials) and the two `verify:*` scripts. Those check the parsers and guard against live Picnic data, which is what makes them valuable and why they cannot run in CI. Green CI means nothing regressed against our assumptions; it is not evidence the guard is correct. Per the Step 13 lesson, that still requires real payloads.
+
+🟩 `matchesRecipeQuery` moved from `agent/tools.ts` into `recipe/match.ts` — recipe-domain logic, and testable without the agent's credentials. Writing its first tests exposed a live defect: the doc comment claimed filler words were dropped, but the filter only removed single characters, so `words.every(...)` made "met" and "en" mandatory. A query of "recept met pompoen" therefore matched nothing and the assistant would report the household's own saved recipe #1 as not saved — the exact false-negative the word-based match had been written to fix. Now dropped via an explicit `STOPWORDS` set, with assertions confirmed to fail against the old implementation before being kept.
+
+---
+
 ## v2 Backlog (designed, not built)
 
 ### Active diff observation
