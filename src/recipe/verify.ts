@@ -50,29 +50,40 @@ async function main(): Promise<void> {
     const savedPage = await client.getSavedRecipesPage();
     saved = parseRecipeList(savedPage, { saved: true });
 
-    const first = saved[0];
-    if (!first) {
+    if (saved.length === 0) {
       console.error('No saved recipes parsed — nothing to check details against.');
       process.exit(1);
     }
-    console.log(`Fetching details for "${first.name}"…\n`);
-    details = parseRecipeDetails(await client.getRecipeDetailsPage(first.id), first.id);
 
-    // A live run is the only place we can check MORE than one recipe cheaply
-    // enough to be worth it, so sample a few and report parse failures.
-    for (const recipe of saved.slice(0, Math.max(0, detailLimit))) {
+    // Sample several recipes rather than one: a parser that works on the first
+    // recipe but not the fourth is the failure mode fixtures cannot catch.
+    // Each detail page is ~3 MB, so keep the sample small by default.
+    const sample = saved.slice(0, Math.max(1, detailLimit));
+    console.log(`Fetching details for ${sample.length} recipe(s) (~3 MB each)…\n`);
+    details = null;
+
+    for (const recipe of sample) {
       const d = parseRecipeDetails(await client.getRecipeDetailsPage(recipe.id), recipe.id);
       if (!d) {
         console.error(`  PARSE FAILED for "${recipe.name}" (${recipe.id})`);
         problems++;
         continue;
       }
+      // Keep the first successful parse for the detailed printout below.
+      details ??= d;
+
       const missing = d.ingredients.filter((i) => i.articleId === null).length;
+      const selected = d.ingredients.filter((i) => i.selected).length;
       console.log(
-        `  ok  ${recipe.name} — ${d.ingredients.length} ingredients, ` +
-          `${d.portions ?? '?'} portions${missing > 0 ? `, ${missing} WITHOUT an article id` : ''}`,
+        `  ok  ${recipe.name} — ${d.ingredients.length} ingredients ` +
+          `(${selected} pre-selected), ${d.portions ?? '?'} portions` +
+          `${missing > 0 ? `, ${missing} WITHOUT an article id` : ''}`,
       );
       if (missing > 0) problems++;
+      if (selected === 0) {
+        console.error(`      no ingredient pre-selected — the selection signal may have moved`);
+        problems++;
+      }
     }
     console.log('');
   } else {
