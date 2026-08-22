@@ -20,6 +20,14 @@ import {
   type DraftCart,
 } from '../memory/index.js';
 
+/** Which recipe an item came from, when it came from one. */
+export interface DraftRecipeRef {
+  /** Qualified id, e.g. "picnic:6335ac…". */
+  id: string;
+  name: string;
+  source: string;
+}
+
 export interface DraftItem {
   articleId: string;
   articleName: string;
@@ -36,6 +44,18 @@ export interface DraftItem {
   glutenStatus?: 'allowed' | 'unverified';
   /** The guard's one-line reason, shown verbatim next to the item. */
   glutenNote?: string;
+  /**
+   * The recipe that put this article in the draft, when one did. Absent on
+   * ad-hoc adds and on drafts written before rotation tracking existed.
+   *
+   * Tagged per item rather than kept as a separate list on the draft, so that
+   * removing a recipe's ingredients removes the recipe: `commit_draft_to_cart`
+   * derives what was cooked from the items that actually survive to the cart.
+   * A recipe the household struck out during review never happened.
+   */
+  recipeId?: string;
+  recipeName?: string;
+  recipeSource?: string;
 }
 
 /**
@@ -58,6 +78,7 @@ export function addToDraft(
   articleName: string,
   quantityToAdd = 1,
   gluten?: { status: 'allowed' | 'unverified'; note: string },
+  recipe?: DraftRecipeRef,
 ): DraftItem[] {
   const items = loadDraft(db, conversationKey);
   const existing = items.find((i) => i.articleId === articleId);
@@ -68,12 +89,26 @@ export function addToDraft(
       existing.glutenStatus = gluten.status;
       existing.glutenNote = gluten.note;
     }
+    // First recipe to claim an article keeps it. Two recipes sharing an
+    // ingredient is normal (onion, garlic), and reassigning it on every add
+    // would move the attribution around for no gain. The later recipe is still
+    // recorded via its own other ingredients — only a recipe whose ENTIRE
+    // ingredient list is already in the draft goes unattributed, which means
+    // the same meal twice over.
+    if (recipe && existing.recipeId === undefined) {
+      existing.recipeId = recipe.id;
+      existing.recipeName = recipe.name;
+      existing.recipeSource = recipe.source;
+    }
   } else {
     items.push({
       articleId,
       articleName,
       quantity: quantityToAdd,
       ...(gluten ? { glutenStatus: gluten.status, glutenNote: gluten.note } : {}),
+      ...(recipe
+        ? { recipeId: recipe.id, recipeName: recipe.name, recipeSource: recipe.source }
+        : {}),
     });
   }
   upsertDraftCart(db, conversationKey, items);
@@ -114,6 +149,27 @@ export function removeFromDraft(
   }
   upsertDraftCart(db, conversationKey, items);
   return items;
+}
+
+/**
+ * The distinct recipes represented in a set of draft items, in the order they
+ * first appear.
+ *
+ * This is what gets written to `recipe_usage` at commit time, and it is
+ * deliberately derived from the items rather than tracked alongside them: an
+ * item removed from the draft takes its recipe's claim with it.
+ */
+export function recipesInDraft(items: DraftItem[]): DraftRecipeRef[] {
+  const seen = new Map<string, DraftRecipeRef>();
+  for (const item of items) {
+    if (item.recipeId === undefined || seen.has(item.recipeId)) continue;
+    seen.set(item.recipeId, {
+      id: item.recipeId,
+      name: item.recipeName ?? item.recipeId,
+      source: item.recipeSource ?? 'unknown',
+    });
+  }
+  return [...seen.values()];
 }
 
 /** Wipe the draft for a conversation. Used after a successful commit. */
