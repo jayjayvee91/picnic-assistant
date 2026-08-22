@@ -9,4 +9,12 @@ export { RecipeRegistry } from './registry.js';
 export { PicnicRecipeSource, type PicnicRecipeSourceOptions } from './picnic-source.js';
 export { parseRecipeList, parseRecipeDetails } from './fusion-parse.js';
 export { matchesRecipeQuery, significantWords } from './match.js';
+export {
+  rankByRotation,
+  splitByRotationWindow,
+  DEFAULT_ROTATION_DAYS,
+  NEVER_USED_NOTE,
+  type RankedRecipe,
+  type RecipeUsageInfo,
+} from './rotation.js';
 export type { RecipeSource, RecipeSummary, RecipeDetails, RecipeIngredient } from './types.js';

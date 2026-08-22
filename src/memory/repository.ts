@@ -49,8 +49,34 @@ export interface DraftCart {
     /** Gluten verdict at add time; absent on drafts written before the guard. */
     glutenStatus?: 'allowed' | 'unverified';
     glutenNote?: string;
+    /**
+     * The recipe this item came from, when it was added by
+     * `add_recipe_to_draft`. Absent on ad-hoc adds and on drafts written
+     * before recipe rotation existed.
+     */
+    recipeId?: string;
+    recipeName?: string;
+    recipeSource?: string;
   }>;
   updatedAt: string;
+}
+
+/** One occasion on which a recipe was cooked. */
+export interface RecipeUsageRecord {
+  recipeId: string;
+  recipeName: string;
+  source: string;
+  usedAt: string;
+}
+
+/** Aggregated history for one recipe — what the rotation logic reads. */
+export interface RecipeUsageStat {
+  recipeId: string;
+  recipeName: string;
+  source: string;
+  /** ISO timestamp of the most recent use. */
+  lastUsedAt: string;
+  timesUsed: number;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -278,6 +304,122 @@ export function getLatestSuggestion(db: DB): SuggestionLogRecord | null {
     .get() as { id: number; created_at: string; payload_json: string } | undefined;
   if (!row) return null;
   return { id: row.id, createdAt: row.created_at, payloadJson: row.payload_json };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Recipe usage — what was cooked, and when
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Record that a set of recipes was cooked. Called once per committed draft,
+ * with the distinct recipes whose ingredients actually reached the cart.
+ *
+ * Returns the number of rows written. Duplicates within the same instant are
+ * ignored rather than throwing: committing the same recipe twice in one second
+ * is a double-click, not two meals.
+ */
+export function recordRecipeUsage(
+  db: DB,
+  recipes: Array<{ recipeId: string; recipeName: string; source: string }>,
+  opts: { suggestionId?: number | null; usedAt?: string } = {},
+): number {
+  if (recipes.length === 0) return 0;
+  const usedAt = opts.usedAt ?? new Date().toISOString();
+  const suggestionId = opts.suggestionId ?? null;
+
+  const insert = db.prepare(
+    `INSERT INTO recipe_usage (recipe_id, recipe_name, source, used_at, suggestion_id)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(recipe_id, used_at) DO NOTHING`,
+  );
+  const tx = db.transaction(() => {
+    let written = 0;
+    for (const r of recipes) {
+      const result = insert.run(r.recipeId, r.recipeName, r.source, usedAt, suggestionId);
+      written += result.changes;
+    }
+    return written;
+  });
+  return tx();
+}
+
+/**
+ * Usage history for every recipe that has one, keyed by qualified recipe id.
+ *
+ * A Map rather than a list because the caller joins it onto a recipe listing:
+ * recipes with no history are the common case early on and must read as
+ * "never cooked", not as missing.
+ */
+export function getRecipeUsageStats(db: DB): Map<string, RecipeUsageStat> {
+  const rows = db
+    .prepare(
+      // The name and source come from correlated subqueries rather than bare
+      // columns: SQLite only promises bare columns match the MIN/MAX row when
+      // there is exactly one such aggregate, and COUNT(*) here makes two.
+      // Taking the most recent row is also the right answer on its own terms —
+      // recipe titles change upstream, and the newest one is least confusing.
+      `SELECT u.recipe_id,
+              MAX(u.used_at) AS last_used_at,
+              COUNT(*)       AS times_used,
+              (SELECT u2.recipe_name
+                 FROM recipe_usage u2
+                WHERE u2.recipe_id = u.recipe_id
+                ORDER BY u2.used_at DESC
+                LIMIT 1) AS recipe_name,
+              (SELECT u3.source
+                 FROM recipe_usage u3
+                WHERE u3.recipe_id = u.recipe_id
+                ORDER BY u3.used_at DESC
+                LIMIT 1) AS source
+         FROM recipe_usage u
+        GROUP BY u.recipe_id`,
+    )
+    .all() as Array<{
+    recipe_id: string;
+    last_used_at: string;
+    times_used: number;
+    source: string;
+    recipe_name: string;
+  }>;
+
+  const stats = new Map<string, RecipeUsageStat>();
+  for (const r of rows) {
+    stats.set(r.recipe_id, {
+      recipeId: r.recipe_id,
+      recipeName: r.recipe_name,
+      source: r.source,
+      lastUsedAt: r.last_used_at,
+      timesUsed: r.times_used,
+    });
+  }
+  return stats;
+}
+
+/**
+ * The most recent cooking occasions, newest first. Feeds the "recent recipes"
+ * block of the system prompt, so the model can see what was just eaten without
+ * spending a tool call on it.
+ */
+export function getRecentRecipeUsage(db: DB, limit: number): RecipeUsageRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT recipe_id, recipe_name, source, used_at
+         FROM recipe_usage
+        ORDER BY used_at DESC
+        LIMIT ?`,
+    )
+    .all(limit) as Array<{
+    recipe_id: string;
+    recipe_name: string;
+    source: string;
+    used_at: string;
+  }>;
+  return rows.map((r) => ({
+    recipeId: r.recipe_id,
+    recipeName: r.recipe_name,
+    source: r.source,
+    usedAt: r.used_at,
+  }));
 }
 
 // ──────────────────────────────────────────────────────────────────────

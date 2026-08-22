@@ -87,8 +87,32 @@ everything would roughly quadruple a week's bill. Pass `includeExtras` to opt in
 Sources live behind a registry, so a personal recipe database can be added later
 without changing the agent tools or the prompt.
 
+**It won't serve you the same week twice.** Committing a draft records which
+recipes it contained in the `recipe_usage` table, and `list_recipes` returns
+each recipe with how long ago it was last cooked — ordered stalest first, never
+cooked at the top. For a week menu the agent passes `excludeUsedWithinDays`
+(14 by default) so the last shop's dinners are left out, and the most recent
+ones are shown in the system prompt as well.
+
+This is stored rather than inferred on purpose. Order history records
+*articles*, and recipes overlap heavily in their ingredients, so "did we eat
+the risotto last week" cannot be recovered from an order without guessing —
+which is why the assistant used to happily propose Thursday's dinner again on
+the following Thursday.
+
+Two consequences worth knowing. The history starts where the tracking does, so
+for the first couple of weeks most recipes report `daysSinceUsed: null`, which
+means "no record", not "never eaten" — the agent is told not to claim the
+latter. And a rejected suggestion never counts: usage is recorded at commit,
+from the ingredients that actually reached the cart, so a recipe struck out
+during review does not suppress itself from next week.
+
+Want a different rotation window? State it in the Patterns section of
+`profile.md` and the agent honours that over the 14-day default.
+
 ```bash
-npm run smoke:recipe    # parser checks against fixtures, offline
+npm run smoke:recipe    # parser + rotation ranking, offline
+npm run smoke:rotation  # rotation through the real schema, offline
 npm run verify:recipe   # parse real captured data; --live to fetch fresh
 ```
 

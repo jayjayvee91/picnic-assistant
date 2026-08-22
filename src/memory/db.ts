@@ -61,6 +61,8 @@ function migrate(db: DB): void {
  *   products_seen   catalogue of every article we have ever observed
  *   suggestion_log  payload of each draft the bot has proposed (kept for v2
  *                   diff observation; we log to it in v1 already)
+ *   recipe_usage    which recipes were actually cooked, and when — the memory
+ *                   that stops the weekly menu repeating itself
  *   chat_turns      lightweight transcript with identity (Telegram user)
  *   draft_cart      in-progress draft per conversation
  *   api_spend_daily Anthropic spend per UTC day for the kill-switch
@@ -109,6 +111,40 @@ CREATE TABLE IF NOT EXISTS suggestion_log (
   payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_suggestion_log_created ON suggestion_log(created_at DESC);
+
+-- Which recipes the household has actually cooked, and when.
+--
+-- This is the one thing the order history cannot tell us. An order records
+-- articles, and recipes overlap heavily in their ingredients (onion, tomato,
+-- garlic), so "did we eat the risotto last week" is not recoverable from
+-- order_items without guessing. Without this table the weekly menu has no
+-- way to avoid repeating what was just eaten — which is exactly what it did.
+--
+-- One row per (recipe, commit). Written when a draft containing the recipe is
+-- committed to the Picnic cart, NOT when it is added to the draft: a recipe
+-- the household rejected during review was never eaten and must not suppress
+-- itself from next week's suggestions.
+--
+-- "Committed to the cart" is a proxy for "cooked" — the household still places
+-- the order themselves in the Picnic app, and could in principle drop the
+-- ingredients before checkout. It is the last point the bot can observe, and
+-- it is close enough: the alternative is matching carts against later
+-- deliveries by ingredient overlap, which is the same guesswork this table
+-- exists to avoid.
+--
+-- used_at is part of the key so the same recipe can be recorded on many
+-- occasions; that history is what the timesUsed count reflects.
+CREATE TABLE IF NOT EXISTS recipe_usage (
+  recipe_id     TEXT NOT NULL,   -- qualified across sources, e.g. "picnic:6335ac…"
+  recipe_name   TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  used_at       TEXT NOT NULL,
+  -- The suggestion_log row for the same commit, when there is one. Lets a
+  -- past menu be reconstructed with its articles rather than names alone.
+  suggestion_id INTEGER,
+  PRIMARY KEY (recipe_id, used_at)
+);
+CREATE INDEX IF NOT EXISTS idx_recipe_usage_used_at ON recipe_usage(used_at DESC);
 
 CREATE TABLE IF NOT EXISTS chat_turns (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,

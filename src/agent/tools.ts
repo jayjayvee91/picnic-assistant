@@ -26,6 +26,8 @@ import {
   getRecentOrders,
   searchOrderHistory,
   logSuggestion,
+  recordRecipeUsage,
+  getRecipeUsageStats,
   getRecentAllergenDecisions,
   upsertAllergenOverride,
   type DB,
@@ -39,7 +41,15 @@ import {
   type CheckResult,
   type RuleSection,
 } from '../allergen/index.js';
-import { matchesRecipeQuery } from '../recipe/index.js';
+import {
+  matchesRecipeQuery,
+  rankByRotation,
+  splitByRotationWindow,
+  DEFAULT_ROTATION_DAYS,
+  NEVER_USED_NOTE,
+  type RankedRecipe,
+  type RecipeUsageInfo,
+} from '../recipe/index.js';
 import type { RecipeRegistry } from '../recipe/index.js';
 import {
   addToDraft,
@@ -47,6 +57,7 @@ import {
   loadDraft,
   emptyDraft,
   unverifiedDraftItems,
+  recipesInDraft,
   type DraftItem,
 } from './draft.js';
 import { extractRecipeFromUrl } from './recipes.js';
@@ -151,7 +162,11 @@ export const AGENT_TOOLS: Tool[] = [
       "List the household's saved recipes (their Picnic favourites, plus any " +
       'other configured recipe source). Use this whenever they ask what to eat, ' +
       'for a week menu, or for recipe ideas. These are REAL saved recipes — ' +
-      'prefer them over inventing dishes. Returns id, name and source.',
+      'prefer them over inventing dishes. Returns id, name, source, and how ' +
+      'long ago each was last cooked. Results are ordered stalest first — ' +
+      'never cooked, then longest ago — so the top of the list is what a new ' +
+      'week should be built from. For a week menu, pass ' +
+      'excludeUsedWithinDays so recipes from the last shop are left out.',
     input_schema: {
       type: 'object',
       properties: {
@@ -164,6 +179,16 @@ export const AGENT_TOOLS: Tool[] = [
             'search with its DISTINCTIVE words rather than the whole sentence.',
         },
         limit: { type: 'number', description: 'Max results (default 40, max 100).' },
+        excludeUsedWithinDays: {
+          type: 'number',
+          description:
+            'Leave out recipes cooked within this many days. Use it when ' +
+            `proposing a new week menu — ${DEFAULT_ROTATION_DAYS} is the default ` +
+            'window unless the household stated their own in the profile. ' +
+            'Recipes with no recorded use are always kept: no record is not ' +
+            'evidence of a recent meal. Do NOT pass this when looking up a ' +
+            'specific recipe by name — you would hide the one they asked about.',
+        },
       },
     },
   },
@@ -828,6 +853,21 @@ async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
     }
   }
 
+  // Record what was cooked, from the items that actually reached Picnic. This
+  // is the write that stops next week repeating this week: `list_recipes`
+  // ranks on it, and the system prompt shows it back.
+  //
+  // Derived from `applied` rather than from the draft, so a recipe whose
+  // ingredients all failed to send is not logged as a meal. Failures are
+  // rare, and one that silently suppressed a recipe for a fortnight would be
+  // invisible to the household.
+  const cookedRecipes = recipesInDraft(applied);
+  const recipesRecorded = recordRecipeUsage(
+    ctx.db,
+    cookedRecipes.map((r) => ({ recipeId: r.id, recipeName: r.name, source: r.source })),
+    { suggestionId },
+  );
+
   // Only clear the draft if everything landed — if some failed, we keep the
   // unapplied portion so the agent can retry or surface a question.
   if (failed.length === 0) {
@@ -844,6 +884,16 @@ async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
         r.articleName,
         r.quantity,
         r.glutenStatus ? { status: r.glutenStatus, note: r.glutenNote ?? '' } : undefined,
+        // Keep the recipe tag across the requeue: a retried commit must still
+        // know which recipes it is finishing, or the ones that failed the first
+        // time would never be recorded as cooked.
+        r.recipeId !== undefined
+          ? {
+              id: r.recipeId,
+              name: r.recipeName ?? r.recipeId,
+              source: r.recipeSource ?? 'unknown',
+            }
+          : undefined,
       );
     }
   }
@@ -853,6 +903,14 @@ async function handleCommitDraft(ctx: AgentContext): Promise<unknown> {
     applied,
     failed,
     suggestionId,
+    ...(recipesRecorded > 0
+      ? {
+          recipesRecorded: cookedRecipes.map((r) => r.name),
+          recipesRecordedNote:
+            'Deze recepten zijn vastgelegd als gemaakt, zodat ze de komende weken niet ' +
+            'opnieuw voorgesteld worden. Dit hoef je niet te melden.',
+        }
+      : {}),
     // Surfaced so the agent repeats the warning in its confirmation message —
     // the household's last chance to catch an unverified item before delivery.
     unverified: unverified.map((i) => ({
@@ -899,9 +957,26 @@ async function handleListRecipes(
 ): Promise<unknown> {
   const query = typeof input['query'] === 'string' ? input['query'] : null;
   const limit = clampNumber(input['limit'], 1, 100, 40);
+  const excludeUsedWithinDays =
+    typeof input['excludeUsedWithinDays'] === 'number'
+      ? clampNumber(input['excludeUsedWithinDays'], 0, 365, DEFAULT_ROTATION_DAYS)
+      : null;
 
   const { recipes, failures } = await ctx.recipes.listRecipes({ savedOnly: true });
-  const filtered = query ? recipes.filter((r) => matchesRecipeQuery(r.name, query)) : recipes;
+
+  // Rank before filtering or truncating. The listing gets cut to `limit` and
+  // the library is larger than that, so whatever order this produces decides
+  // which recipes the model can see at all — stalest first means the visible
+  // window is the part worth cooking, instead of the same head of Picnic's
+  // page order every week.
+  const usage = loadRecipeUsage(ctx.db);
+  const ranked = rankByRotation(recipes, usage, new Date());
+  const matching = query ? ranked.filter((r) => matchesRecipeQuery(r.name, query)) : ranked;
+
+  const { eligible: filtered, tooRecent } =
+    excludeUsedWithinDays === null
+      ? { eligible: matching, tooRecent: [] as RankedRecipe[] }
+      : splitByRotationWindow(matching, excludeUsedWithinDays);
 
   const shown = filtered.slice(0, limit);
   return {
@@ -916,10 +991,14 @@ async function handleListRecipes(
     ...(query && filtered.length === 0
       ? {
           noMatchNote:
-            `Geen recept met "${query}" in de naam. Dat betekent NIET dat het recept er ` +
-            'niet is — de zoekterm week mogelijk af van de precieze naam. Zeg dat je het ' +
-            'niet kunt vinden en vraag welke bedoeld wordt; beweer niet dat het niet ' +
-            'bewaard is.',
+            `Geen recept met "${query}" in de naam` +
+            (tooRecent.length > 0
+              ? ` in de overgebleven lijst — er ${tooRecent.length === 1 ? 'is er 1' : `zijn er ${tooRecent.length}`} ` +
+                'weggefilterd omdat ze recent gemaakt zijn. Zoek opnieuw zonder ' +
+                'excludeUsedWithinDays voordat je iets beweert.'
+              : '. Dat betekent NIET dat het recept er niet is — de zoekterm week ' +
+                'mogelijk af van de precieze naam. Zeg dat je het niet kunt vinden en ' +
+                'vraag welke bedoeld wordt; beweer niet dat het niet bewaard is.'),
           someSavedRecipes: recipes.slice(0, 15).map((r) => r.name),
         }
       : {}),
@@ -931,7 +1010,34 @@ async function handleListRecipes(
             'zijn; beweer niet dat dit de hele lijst is. Gebruik query of limit voor de rest.',
         }
       : {}),
-    recipes: shown.map((r) => ({ id: r.id, name: r.name, source: r.source })),
+    recipes: shown.map((r) => ({
+      id: r.id,
+      name: r.name,
+      source: r.source,
+      lastUsedAt: r.lastUsedAt,
+      daysSinceUsed: r.daysSinceUsed,
+      timesUsed: r.timesUsed,
+    })),
+    rotationNote:
+      'Gesorteerd op wat het langst geleden gemaakt is; bovenaan staat wat nooit ' +
+      'is vastgelegd. Stel voor een weekmenu bij voorkeur iets van bovenaan voor, ' +
+      'en herhaal niet wat er net op tafel stond. Willen ze bewust iets herhalen, ' +
+      'dan mag dat — zeg er dan bij dat je het bewust herhaalt. ' +
+      NEVER_USED_NOTE,
+    // Said out loud rather than silently subtracted: a shorter list would
+    // otherwise read as a smaller library.
+    ...(tooRecent.length > 0
+      ? {
+          excludedAsRecentlyCooked: tooRecent.slice(0, 15).map((r) => ({
+            name: r.name,
+            daysSinceUsed: r.daysSinceUsed,
+          })),
+          excludedNote:
+            `${tooRecent.length} recept(en) zijn overgeslagen omdat ze binnen ` +
+            `${excludeUsedWithinDays ?? DEFAULT_ROTATION_DAYS} dagen gemaakt zijn. ` +
+            'Noem dat kort als het huishouden zich afvraagt waar iets gebleven is.',
+        }
+      : {}),
     // Surfaced rather than swallowed: if a source is down the household should
     // hear "I couldn't reach X" instead of a silently shorter list.
     ...(failures.length > 0 ? { unavailableSources: failures } : {}),
@@ -946,6 +1052,21 @@ async function handleListRecipes(
       'vermoedens — roep get_recipe_details aan als iemand wil weten of een ' +
       'recept veilig is.',
   };
+}
+
+/**
+ * Usage history in the shape the rotation logic wants.
+ *
+ * The recipe layer deliberately knows nothing about SQLite, so the translation
+ * happens here rather than making `rotation.ts` take a DB handle — which is
+ * what keeps that module testable offline.
+ */
+function loadRecipeUsage(db: DB): Map<string, RecipeUsageInfo> {
+  const usage = new Map<string, RecipeUsageInfo>();
+  for (const [recipeId, stat] of getRecipeUsageStats(db)) {
+    usage.set(recipeId, { lastUsedAt: stat.lastUsedAt, timesUsed: stat.timesUsed });
+  }
+  return usage;
 }
 
 /**
@@ -969,7 +1090,7 @@ interface ResolvedIngredient {
 }
 
 interface ResolvedRecipe {
-  recipe: { id: string; name: string | null; portions: number | null };
+  recipe: { id: string; name: string | null; source: string; portions: number | null };
   items: ResolvedIngredient[];
   /** Ingredients Picnic listed without a product — the agent must search. */
   skippedNoArticle: number;
@@ -1008,7 +1129,12 @@ async function resolveIngredients(
   }
 
   return {
-    recipe: { id: details.id, name: details.name, portions: details.portions },
+    recipe: {
+      id: details.id,
+      name: details.name,
+      source: details.source,
+      portions: details.portions,
+    },
     items,
     skippedNoArticle,
   };
@@ -1082,6 +1208,14 @@ async function handleAddRecipeToDraft(
       {
         status: item.verdict,
         note: String((item.gluten as { reason?: unknown }).reason ?? ''),
+      },
+      // Tagging here is what lets the commit record which recipes were cooked.
+      // Without it the recipe identity is lost at this hop and the weekly menu
+      // has nothing to avoid repeating.
+      {
+        id: resolved.recipe.id,
+        name: resolved.recipe.name ?? resolved.recipe.id,
+        source: resolved.recipe.source,
       },
     );
     added.push({

@@ -11,6 +11,7 @@
 
 import { parseRecipeList, parseRecipeDetails } from './fusion-parse.js';
 import { matchesRecipeQuery, significantWords } from './match.js';
+import { rankByRotation, splitByRotationWindow, type RecipeUsageInfo } from './rotation.js';
 import { RecipeRegistry } from './registry.js';
 import type { RecipeDetails, RecipeSource, RecipeSummary } from './types.js';
 
@@ -466,6 +467,122 @@ check('an empty query matches', matchesRecipeQuery(QUINOA, ''));
 check('a punctuation-only query matches', matchesRecipeQuery(QUINOA, '???'));
 check('a query of nothing but filler matches', matchesRecipeQuery(QUINOA, 'het recept van de'));
 check('single characters cannot decide a match', matchesRecipeQuery(QUINOA, 'a'));
+
+// ──────────────────────────────────────────────────────────────────────
+// Recipe rotation
+//
+// The defect this replaces: the weekly menu proposed what the household had
+// eaten days earlier. Nothing recorded which recipes were cooked, and the
+// listing carried no time dimension, so the model had nothing to avoid. These
+// checks pin both halves of the fix — that history sorts a listing, and that
+// a missing history never reads as a recent meal.
+// ──────────────────────────────────────────────────────────────────────
+
+const NOW = new Date('2026-08-22T12:00:00Z');
+
+const library: RecipeSummary[] = [
+  { id: 'picnic:a', name: 'Aardappelgratin', source: 'picnic', saved: true },
+  { id: 'picnic:b', name: 'Bloemkoolcurry', source: 'picnic', saved: true },
+  { id: 'picnic:c', name: 'Chorizorisotto', source: 'picnic', saved: true },
+  { id: 'picnic:d', name: 'Dahl met spinazie', source: 'picnic', saved: true },
+];
+
+const usage = new Map<string, RecipeUsageInfo>([
+  // Cooked three days ago — the thing they just ate.
+  ['picnic:c', { lastUsedAt: '2026-08-19T18:00:00Z', timesUsed: 4 }],
+  // Cooked two months ago — fair game again.
+  ['picnic:a', { lastUsedAt: '2026-06-22T18:00:00Z', timesUsed: 1 }],
+  // Yesterday.
+  ['picnic:b', { lastUsedAt: '2026-08-21T18:00:00Z', timesUsed: 2 }],
+]);
+
+const ranked = rankByRotation(library, usage, NOW);
+
+check(
+  'never-cooked recipes rank first',
+  ranked[0]?.id === 'picnic:d',
+  ranked.map((r) => r.id).join(','),
+);
+check(
+  'the rest rank longest-ago first',
+  ranked.map((r) => r.id).join(',') === 'picnic:d,picnic:a,picnic:c,picnic:b',
+  ranked.map((r) => `${r.id}:${String(r.daysSinceUsed)}`).join(','),
+);
+// 19 Aug 18:00 → 22 Aug 12:00 is 2 days and 18 hours. Floored, not rounded:
+// a recipe is "2 days ago" until the third day has fully passed, which is the
+// conservative direction for a rotation window.
+check(
+  'day counts floor to whole days',
+  ranked.find((r) => r.id === 'picnic:c')?.daysSinceUsed === 2,
+);
+check(
+  'a never-cooked recipe reports null, not zero',
+  ranked.find((r) => r.id === 'picnic:d')?.daysSinceUsed === null &&
+    ranked.find((r) => r.id === 'picnic:d')?.lastUsedAt === null,
+);
+check('use counts come through', ranked.find((r) => r.id === 'picnic:c')?.timesUsed === 4);
+check(
+  'lastUsedAt is a plain date',
+  ranked.find((r) => r.id === 'picnic:a')?.lastUsedAt === '2026-06-22',
+);
+
+// Ranking must not depend on the order the library arrives in — Picnic's page
+// order is arbitrary and changes, and an unstable listing would return
+// different recipes on a retry of the same request.
+const shuffled = rankByRotation([...library].reverse(), usage, NOW);
+check(
+  'ranking is independent of input order',
+  shuffled.map((r) => r.id).join(',') === ranked.map((r) => r.id).join(','),
+);
+
+const { eligible, tooRecent } = splitByRotationWindow(ranked, 14);
+check(
+  'recipes inside the window are held back',
+  tooRecent
+    .map((r) => r.id)
+    .sort()
+    .join(',') === 'picnic:b,picnic:c',
+  tooRecent.map((r) => r.id).join(','),
+);
+check(
+  'recipes outside the window stay',
+  eligible
+    .map((r) => r.id)
+    .sort()
+    .join(',') === 'picnic:a,picnic:d',
+  eligible.map((r) => r.id).join(','),
+);
+
+// The load-bearing one. No usage record means the tracking has not seen it,
+// which is not evidence of a recent meal — dropping those would hide most of
+// the library in the first weeks after this shipped, when the table is empty.
+check(
+  'no usage record is never treated as recently cooked',
+  splitByRotationWindow(rankByRotation(library, new Map(), NOW), 365).tooRecent.length === 0,
+);
+
+// A recipe cooked exactly `withinDays` ago is out of the window, not in it —
+// otherwise a 14-day rotation silently becomes 15.
+const boundary = rankByRotation(
+  [{ id: 'picnic:e', name: 'Erwtensoep', source: 'picnic', saved: true }],
+  new Map([['picnic:e', { lastUsedAt: '2026-08-08T12:00:00Z', timesUsed: 1 }]]),
+  NOW,
+);
+check('the rotation window boundary is exclusive', boundary[0]?.daysSinceUsed === 14);
+check(
+  'a recipe exactly one window old is eligible again',
+  splitByRotationWindow(boundary, 14).eligible.length === 1,
+);
+
+// Clock skew, or a same-day re-commit, must not sort a just-cooked recipe to
+// the top of a stalest-first list — the exact inverse of the intent.
+const future = rankByRotation(
+  [{ id: 'picnic:f', name: 'Forel', source: 'picnic', saved: true }],
+  new Map([['picnic:f', { lastUsedAt: '2026-08-23T12:00:00Z', timesUsed: 1 }]]),
+  NOW,
+);
+check('a future timestamp clamps to zero days', future[0]?.daysSinceUsed === 0);
+check('and is held back by the window', splitByRotationWindow(future, 14).tooRecent.length === 1);
 
 // ──────────────────────────────────────────────────────────────────────
 

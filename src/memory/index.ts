@@ -10,6 +10,9 @@ export {
   searchOrderHistory,
   logSuggestion,
   getLatestSuggestion,
+  recordRecipeUsage,
+  getRecipeUsageStats,
+  getRecentRecipeUsage,
   upsertDraftCart,
   getDraftCart,
   clearDraftCart,
@@ -35,6 +38,8 @@ export {
   type OrderItemRecord,
   type OrderHistorySearchHit,
   type SuggestionLogRecord,
+  type RecipeUsageRecord,
+  type RecipeUsageStat,
   type DraftCart,
   type ChatTurnInput,
 } from './repository.js';

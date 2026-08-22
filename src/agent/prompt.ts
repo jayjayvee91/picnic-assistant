@@ -3,7 +3,7 @@
  *
  * Structured so the cacheable parts (instructions, tool guidance, profile,
  * purchase summary) live in one block and the per-turn dynamic parts (today's
- * date, latest orders) live in another. The Anthropic SDK supports
+ * date, latest orders, recently cooked recipes) live in another. The Anthropic SDK supports
  * `cache_control` on individual system blocks — see `client.ts`.
  *
  * Everything user-facing is in Dutch (per the locked tone decision). System
@@ -14,10 +14,12 @@
 import {
   loadStoredSummary,
   getRecentOrders,
+  getRecentRecipeUsage,
   loadProfile,
   type DB,
   type PurchaseSummary,
 } from '../memory/index.js';
+import { DEFAULT_ROTATION_DAYS } from '../recipe/index.js';
 
 export interface SystemPromptContext {
   /** Open SQLite handle (Step 3). */
@@ -33,7 +35,7 @@ export interface SystemPromptContext {
 export interface SystemPromptBlocks {
   /** Stable across turns; cache-eligible. */
   staticBlock: string;
-  /** Changes per turn — date, recent orders, current speaker. Not cached. */
+  /** Changes per turn — date, recent orders and recipes, speaker. Not cached. */
   dynamicBlock: string;
 }
 
@@ -46,6 +48,7 @@ export async function buildSystemPrompt(ctx: SystemPromptContext): Promise<Syste
   const summary = loadStoredSummary(ctx.db);
   const profile = await loadProfile(ctx.profilePath);
   const recentOrders = recentOrdersBlock(ctx.db);
+  const recentRecipes = recentRecipesBlock(ctx.db, ctx.now);
 
   const staticBlock = [
     AGENT_ROLE,
@@ -76,6 +79,9 @@ export async function buildSystemPrompt(ctx: SystemPromptContext): Promise<Syste
     '',
     '# Laatste bestellingen',
     recentOrders,
+    '',
+    '# Recent gemaakte recepten',
+    recentRecipes,
   ]
     .filter((s) => s !== '')
     .join('\n');
@@ -158,6 +164,24 @@ niet in jullie bewaarde recepten, maar…"). Never blur the two.
 **Picking a recipe.** \`list_recipes\` takes an optional \`query\` to filter \
 by name ("pasta", "curry", "soep"). For a week menu, propose a varied set by \
 name and let the user confirm before adding anything.
+
+**Do not serve them the same week twice.** This household eats from a library \
+of ~95 saved recipes and does not want last week's dinners proposed again. \
+Every recipe in \`list_recipes\` carries \`daysSinceUsed\`, and the listing is \
+already ordered stalest-first — so for a WEEK MENU, pass \
+\`excludeUsedWithinDays\` (default ${DEFAULT_ROTATION_DAYS}) and build the menu \
+from the top of what comes back. The recipes cooked most recently are also \
+listed under "Recent gemaakte recepten" below; treat those as off the table \
+unless asked.
+
+Two things this rule does NOT mean. Do not pass \`excludeUsedWithinDays\` when \
+the user asks about a SPECIFIC recipe by name — you would hide the very thing \
+they asked about and then report it missing. And repeating a dish on purpose \
+is fine when they ask for it; say plainly that you are repeating it, rather \
+than quietly proposing it as if it were new.
+
+If the household states its own rotation window in the profile (Patterns), \
+that wins over the ${DEFAULT_ROTATION_DAYS}-day default.
 
 **What a recipe actually costs.** \`get_recipe_details\` and \
 \`add_recipe_to_draft\` return only the ingredients Picnic PRE-SELECTS. Picnic \
@@ -295,6 +319,41 @@ function recentOrdersBlock(db: DB): string {
       return `## ${date} (€${(o.totalPriceCents / 100).toFixed(2)})\n${itemList}`;
     })
     .join('\n\n');
+}
+
+/**
+ * The recipes most recently cooked, newest first.
+ *
+ * Put in the prompt rather than left to a tool call because "don't repeat last
+ * week" has to hold on every menu request, including the ones where the model
+ * would not have thought to look it up. It is a handful of lines — far cheaper
+ * than the recent-orders block above it.
+ *
+ * Deliberately says so when the history is empty. Recording only started when
+ * rotation tracking shipped, so for the first couple of weeks this block is
+ * thin or bare, and a bare list must not be read as "this household never
+ * cooks anything" — that would invert the whole point of the section.
+ */
+function recentRecipesBlock(db: DB, now: Date): string {
+  const usage = getRecentRecipeUsage(db, 12);
+  if (usage.length === 0) {
+    return (
+      '(Nog niets vastgelegd. Dit gaat pas lopen vanaf het moment dat de bot ' +
+      'recepten bijhoudt — het betekent NIET dat er niets gekookt is. Gebruik ' +
+      'list_recipes en zeg desnoods dat je nog niet weet wat er recent op tafel stond.)'
+    );
+  }
+  const lines = usage.map((u) => {
+    const days = Math.max(0, Math.floor((now.getTime() - Date.parse(u.usedAt)) / 86_400_000));
+    return `- ${u.recipeName} — ${u.usedAt.slice(0, 10)} (${days} dagen geleden)`;
+  });
+  return [
+    'Wat er recent op tafel stond, nieuwste eerst. Stel voor een weekmenu niets voor ' +
+      `dat minder dan ${DEFAULT_ROTATION_DAYS} dagen geleden gemaakt is — het aantal ` +
+      'dagen staat per regel, dus de oudere hieronder mogen wél weer. Vragen ze er ' +
+      'expliciet om, dan mag alles.',
+    ...lines,
+  ].join('\n');
 }
 
 function formatToday(now: Date): string {

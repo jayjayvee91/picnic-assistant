@@ -63,3 +63,10 @@ jobs:
 
       - name: Recipe parser checks
         run: npm run smoke:recipe
+
+      # Recipe rotation, end to end through the real schema on an in-memory
+      # database. Worth running here because its failure mode is silent: a
+      # recipe id dropped on the way to the commit throws nothing and returns
+      # nothing wrong — it just leaves the menu repeating itself again.
+      - name: Recipe rotation checks
+        run: npm run smoke:rotation
