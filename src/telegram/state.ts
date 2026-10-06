@@ -72,20 +72,54 @@ export type AuthFlowState = 'idle' | 'awaiting-sms-code';
 export interface ChatState {
   history: MessageParam[];
   authFlow: AuthFlowState;
+  /** When the household last sent a message that reached the agent. */
+  lastMessageAt: Date | null;
+  /** Anthropic spend of the current conversation, for `/status`. */
+  spentEur: number;
+  /** Claude calls made in the current conversation, for `/status`. */
+  steps: number;
 }
+
+/**
+ * Silence after which the next message starts a fresh conversation. Long
+ * enough for a break in the middle of a weekly shop, short enough that two
+ * shops never blend. Anything worth keeping across shops belongs in long-term
+ * memory (profile, order history, gluten decisions), not in the conversation —
+ * re-sending last week's chat on every step was a large part of the bill.
+ */
+export const CONVERSATION_IDLE_RESET_MS = 4 * 60 * 60 * 1000;
 
 const chatStates = new Map<number, ChatState>();
 
 export function getOrCreateChatState(chatId: number): ChatState {
   let s = chatStates.get(chatId);
   if (!s) {
-    s = { history: [], authFlow: 'idle' };
+    s = { history: [], authFlow: 'idle', lastMessageAt: null, spentEur: 0, steps: 0 };
     chatStates.set(chatId, s);
   }
   return s;
 }
 
-export function resetChatHistory(chatId: number): void {
+/**
+ * Call for every message headed to the agent. Clears the conversation if the
+ * chat has been silent for `CONVERSATION_IDLE_RESET_MS`, then marks now as
+ * the last message. The draft is untouched: it lives in SQLite, not here.
+ */
+export function continueOrStartConversation(chatId: number, now = new Date()): ChatState {
   const s = getOrCreateChatState(chatId);
+  if (s.lastMessageAt && now.getTime() - s.lastMessageAt.getTime() >= CONVERSATION_IDLE_RESET_MS) {
+    startFresh(s);
+  }
+  s.lastMessageAt = now;
+  return s;
+}
+
+export function resetChatHistory(chatId: number): void {
+  startFresh(getOrCreateChatState(chatId));
+}
+
+function startFresh(s: ChatState): void {
   s.history = [];
+  s.spentEur = 0;
+  s.steps = 0;
 }

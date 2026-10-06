@@ -66,6 +66,7 @@ function migrate(db: DB): void {
  *   chat_turns      lightweight transcript with identity (Telegram user)
  *   draft_cart      in-progress draft per conversation
  *   api_spend_daily Anthropic spend per UTC day for the kill-switch
+ *   api_call_log    per-call tokens, cost and tools, to see where spend goes
  *   meta            tiny key/value for flags like `bootstrap_completed`
  *   allergen_decisions        audit trail of every gluten verdict (transparency)
  *   product_allergen_overrides  per-product human corrections + deliberate
@@ -166,6 +167,24 @@ CREATE TABLE IF NOT EXISTS api_spend_daily (
   utc_date  TEXT PRIMARY KEY,    -- YYYY-MM-DD
   spend_eur REAL NOT NULL DEFAULT 0.0
 );
+
+-- One row per Anthropic call: where the money actually goes. The daily total
+-- above only says how much; this says which step and which tool. Tools are
+-- the ones Claude asked for in that response; tool_result_chars is how much
+-- text those tools sent back, which every later step re-sends.
+CREATE TABLE IF NOT EXISTS api_call_log (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  conversation_key   TEXT NOT NULL,
+  input_tokens       INTEGER NOT NULL,
+  output_tokens      INTEGER NOT NULL,
+  cache_write_tokens INTEGER NOT NULL,
+  cache_read_tokens  INTEGER NOT NULL,
+  cost_eur           REAL NOT NULL,
+  tools_json         TEXT NOT NULL,
+  tool_result_chars  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_call_log_created ON api_call_log(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,

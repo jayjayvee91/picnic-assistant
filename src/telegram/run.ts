@@ -86,11 +86,12 @@ async function main(): Promise<void> {
     proposedGlutenRules: new Map(),
   };
 
+  const dailySpendLimitEur = Number.isFinite(dailyLimit) ? dailyLimit : 2;
   const agent = new AgentLoop({
     ctx,
     anthropic,
     profilePath,
-    dailySpendLimitEur: Number.isFinite(dailyLimit) ? dailyLimit : 2,
+    dailySpendLimitEur,
   });
 
   const bot = createBot({
@@ -98,6 +99,7 @@ async function main(): Promise<void> {
     db,
     picnic,
     agent,
+    dailySpendLimitEur,
     envAllowedChatId: envChatId,
   });
 

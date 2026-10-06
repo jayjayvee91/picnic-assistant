@@ -6,7 +6,7 @@
  * misbehaves — see the grilling agreement (Q7) for the rationale and limits.
  */
 
-import { recordApiSpend, getTodayApiSpend, type DB } from '../memory/index.js';
+import { recordApiSpend, getTodayApiSpend, getMeta, setMeta, type DB } from '../memory/index.js';
 
 // ──────────────────────────────────────────────────────────────────────
 // Tool-call iteration cap
@@ -101,6 +101,30 @@ export function assertWithinDailySpendCap(db: DB, limitEur: number): void {
   }
 }
 
+/** Share of the daily limit at which the household gets a heads-up. */
+export const BUDGET_WARNING_FRACTION = 0.75;
+
+const KEY_BUDGET_WARNED_ON = 'budget_warning_sent_utc_date';
+
+/**
+ * The Dutch heads-up to post when today's spend has passed
+ * `BUDGET_WARNING_FRACTION` of the limit — at most once per day, so a weekly
+ * shop is never cut off without warning, and never nagged either. Returns
+ * null when there is nothing to say.
+ */
+export function takeBudgetWarning(db: DB, limitEur: number, now = new Date()): string | null {
+  const spent = getTodayApiSpend(db, now);
+  if (spent < limitEur * BUDGET_WARNING_FRACTION) return null;
+  const today = now.toISOString().slice(0, 10);
+  if (getMeta(db, KEY_BUDGET_WARNED_ON) === today) return null;
+  setMeta(db, KEY_BUDGET_WARNED_ON, today);
+  const eur = (n: number) => `€${n.toFixed(2).replace('.', ',')}`;
+  return (
+    `Let op: vandaag is al ${eur(spent)} van de daglimiet van ${eur(limitEur)} ` +
+    `aan de Anthropic-API uitgegeven. Bij de limiet stopt de bot tot middernacht.`
+  );
+}
+
 /**
  * Record this call's cost. Should be invoked after every successful
  * `messages.create()` so the next call's cap check sees the true total.
@@ -115,8 +139,14 @@ export function recordCallCost(db: DB, usage: AnthropicUsage): number {
 // Conversation token cap (rough heuristic)
 // ──────────────────────────────────────────────────────────────────────
 
-/** Above this many input tokens, we'll summarise older turns. */
-export const CONVERSATION_TOKEN_SOFT_CAP = 30_000;
+/**
+ * Above this many (rough) tokens of prior conversation, the oldest part is
+ * dropped. An emergency brake, not a budget: with the conversation cached, a
+ * long weekly shop is cheap to keep, while every trim forgets recent context
+ * and breaks the cache. A busy shop is ~40k; this leaves room for two and stays
+ * well inside the model's context window.
+ */
+export const CONVERSATION_TOKEN_SOFT_CAP = 100_000;
 
 /**
  * Very rough token estimate: 1 token ≈ 4 chars. Good enough for the soft cap

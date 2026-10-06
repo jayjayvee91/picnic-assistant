@@ -482,6 +482,69 @@ export function getTodayApiSpend(db: DB, now = new Date()): number {
   return row?.spend_eur ?? 0;
 }
 
+export interface ApiCallLogEntry {
+  createdAt: string;
+  conversationKey: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  costEur: number;
+  /** Tools Claude asked for in this response; empty for a final reply. */
+  tools: string[];
+  /** Characters of tool output produced for this step's tool calls. */
+  toolResultChars: number;
+}
+
+export function logApiCall(db: DB, entry: Omit<ApiCallLogEntry, 'createdAt'>): void {
+  db.prepare(
+    `INSERT INTO api_call_log (conversation_key, input_tokens, output_tokens,
+       cache_write_tokens, cache_read_tokens, cost_eur, tools_json, tool_result_chars)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    entry.conversationKey,
+    entry.inputTokens,
+    entry.outputTokens,
+    entry.cacheWriteTokens,
+    entry.cacheReadTokens,
+    entry.costEur,
+    JSON.stringify(entry.tools),
+    entry.toolResultChars,
+  );
+}
+
+/** Logged calls, oldest first. `since` is an ISO timestamp. */
+export function getApiCallLog(db: DB, opts: { since?: string } = {}): ApiCallLogEntry[] {
+  const rows = db
+    .prepare(
+      `SELECT created_at, conversation_key, input_tokens, output_tokens, cache_write_tokens,
+              cache_read_tokens, cost_eur, tools_json, tool_result_chars
+       FROM api_call_log WHERE created_at >= ? ORDER BY id ASC`,
+    )
+    .all(opts.since ?? '') as Array<{
+    created_at: string;
+    conversation_key: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_write_tokens: number;
+    cache_read_tokens: number;
+    cost_eur: number;
+    tools_json: string;
+    tool_result_chars: number;
+  }>;
+  return rows.map((r) => ({
+    createdAt: r.created_at,
+    conversationKey: r.conversation_key,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    cacheReadTokens: r.cache_read_tokens,
+    costEur: r.cost_eur,
+    tools: JSON.parse(r.tools_json) as string[],
+    toolResultChars: r.tool_result_chars,
+  }));
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Meta (small flag store: bootstrap_completed, last_backup_at, etc.)
 // ──────────────────────────────────────────────────────────────────────
