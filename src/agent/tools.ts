@@ -30,6 +30,9 @@ import {
   getRecipeUsageStats,
   getRecentAllergenDecisions,
   upsertAllergenOverride,
+  getRecipeStars,
+  upsertRecipeStars,
+  listStarVocabulary,
   type DB,
   type ProfileSection,
 } from '../memory/index.js';
@@ -61,6 +64,7 @@ import {
   type DraftItem,
 } from './draft.js';
 import { extractRecipeFromUrl } from './recipes.js';
+import { MAX_RECIPES_PER_STAR, cleanStar, findStarClashes, type MenuRecipe } from './variety.js';
 
 // ──────────────────────────────────────────────────────────────────────
 // Agent context — everything tools need
@@ -233,6 +237,65 @@ export const AGENT_TOOLS: Tool[] = [
         },
       },
       required: ['recipeId'],
+    },
+  },
+  {
+    name: 'check_menu_variety',
+    description:
+      'Check a candidate menu for repeated STAR ingredients before proposing it. ' +
+      `No star (spinazie, zalm, kip…) may appear in more than ${MAX_RECIPES_PER_STAR} ` +
+      'recipes of one menu. Pass ALL recipe ids of the menu at once. Returns each ' +
+      "recipe's stars and any clashes. Recipes not judged before come back under " +
+      'needsStars with their ingredients: name their stars with set_recipe_stars, ' +
+      'then call this again. Only propose the menu once ok is true.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        recipeIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Ids from list_recipes, one per dish on the menu.',
+        },
+      },
+      required: ['recipeIds'],
+    },
+  },
+  {
+    name: 'set_recipe_stars',
+    description:
+      'Record the star ingredients of one or more recipes: the 1–3 ingredients ' +
+      'that make the dish what it is, NOT supporting items like onion, garlic, ' +
+      'lemon/lime, fresh herbs, spice mixes, sauces or stock. Use short generic ' +
+      'Dutch names in lower case, and reuse a name from the existing vocabulary ' +
+      'whenever it fits: "spinazie" covers babyspinazie and spinazie gewassen, ' +
+      '"kip" covers kipdijfilets, kipfiletblokjes and kipgehakt. Set ' +
+      'householdCorrection only when the user themselves corrected the stars.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        recipes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              recipeId: { type: 'string' },
+              stars: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '1–3 star ingredients, e.g. ["spinazie", "gnocchi"].',
+              },
+            },
+            required: ['recipeId', 'stars'],
+          },
+        },
+        householdCorrection: {
+          type: 'boolean',
+          description:
+            'True when the user corrected these stars. Their correction is ' +
+            'remembered and never overwritten by your own judgement later.',
+        },
+      },
+      required: ['recipes'],
     },
   },
   {
@@ -571,6 +634,10 @@ async function dispatch(
       return await handleGetRecipeDetails(ctx, input);
     case 'add_recipe_to_draft':
       return await handleAddRecipeToDraft(ctx, input);
+    case 'check_menu_variety':
+      return await handleCheckMenuVariety(ctx, input);
+    case 'set_recipe_stars':
+      return await handleSetRecipeStars(ctx, input);
     case 'check_product_gluten':
       return await handleCheckProductGluten(ctx, input);
     case 'recent_gluten_decisions':
@@ -1268,6 +1335,7 @@ async function handleAddRecipeToDraft(
             'search_picnic_products en vraag de gebruiker om te kiezen.',
         }
       : {}),
+    ...draftVarietyWarning(ctx.db, ctx.conversationKey),
     brandCheckReminder:
       'Controleer de merken hierboven tegen de Brands-sectie van het huishoudprofiel. ' +
       'Picnic kiest zelf een merk; de voorkeur van het huishouden gaat vóór. Stel een ' +
@@ -1275,9 +1343,188 @@ async function handleAddRecipeToDraft(
   };
 }
 
+/**
+ * Safety net for the variety rule. The menu should already have passed
+ * check_menu_variety before anything was added; this catches the case where
+ * that step was skipped, by re-counting the recipes actually in the draft.
+ * A warning, never a refusal — the household may have accepted the repeat.
+ */
+export function draftVarietyWarning(db: DB, conversationKey: string): Record<string, unknown> {
+  const recipes = recipesInDraft(loadDraft(db, conversationKey));
+  if (recipes.length < 2) return {};
+  const stored = getRecipeStars(
+    db,
+    recipes.map((r) => r.id),
+  );
+  const clashes = findStarClashes(
+    recipes.flatMap((r) => {
+      const known = stored.get(r.id);
+      return known ? [{ recipeId: r.id, name: r.name, stars: known.stars }] : [];
+    }),
+  );
+  const unjudged = recipes.filter((r) => !stored.has(r.id)).map((r) => r.name);
+
+  return {
+    ...(clashes.length > 0
+      ? {
+          varietyClashes: clashes,
+          varietyNote:
+            'De recepten in de lijst delen nu een steringrediënt in meer dan ' +
+            `${MAX_RECIPES_PER_STAR} gerechten. Meld dit, tenzij de gebruiker die ` +
+            'herhaling al heeft goedgekeurd.',
+        }
+      : {}),
+    ...(unjudged.length > 0
+      ? {
+          varietyUnchecked: unjudged,
+          varietyUncheckedNote:
+            'Deze recepten zijn niet op herhaalde steringrediënten gecontroleerd. ' +
+            'Roep check_menu_variety aan met alle recepten in de lijst.',
+        }
+      : {}),
+  };
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Gluten: inspection, deliberate exceptions, and teaching the guard
 // ──────────────────────────────────────────────────────────────────────
+
+async function handleCheckMenuVariety(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const requested = requireStringArray(input, 'recipeIds');
+  const names = await recipeNameIndex(ctx);
+  const ids = [...new Set(requested.map((id) => names.canonical(id)))];
+  const stored = getRecipeStars(ctx.db, ids);
+
+  const menu: MenuRecipe[] = [];
+  const needsStars: unknown[] = [];
+  const unreadable: string[] = [];
+
+  for (const recipeId of ids) {
+    const known = stored.get(recipeId);
+    if (known) {
+      menu.push({ recipeId, name: names.nameOf(recipeId) ?? known.recipeName, stars: known.stars });
+      continue;
+    }
+    // Never judged: hand the agent the shopping list so it can name the stars.
+    // Pre-selected only — the pantry extras are never what a dish is about.
+    const resolved = await resolveIngredients(ctx, recipeId, false);
+    if (!resolved) {
+      unreadable.push(recipeId);
+      continue;
+    }
+    needsStars.push({
+      recipeId,
+      name: resolved.recipe.name ?? names.nameOf(recipeId),
+      ingredients: resolved.items.map((i) => i.name ?? i.articleId),
+    });
+  }
+
+  const clashes = findStarClashes(menu);
+  const complete = needsStars.length === 0 && unreadable.length === 0;
+  return {
+    ok: complete && clashes.length === 0,
+    maxRecipesPerStar: MAX_RECIPES_PER_STAR,
+    recipes: menu,
+    clashes,
+    ...(needsStars.length > 0
+      ? {
+          needsStars,
+          existingStarVocabulary: listStarVocabulary(ctx.db),
+          needsStarsNote:
+            'Deze recepten zijn nog niet beoordeeld. Bepaal per recept de 1–3 ' +
+            'steringrediënten, leg ze vast met set_recipe_stars (hergebruik namen ' +
+            'uit existingStarVocabulary waar dat past) en roep check_menu_variety ' +
+            'daarna opnieuw aan met hetzelfde menu.',
+        }
+      : {}),
+    ...(unreadable.length > 0
+      ? {
+          unreadable,
+          unreadableNote:
+            'Deze recepten konden niet worden opgehaald, dus hun ingrediënten zijn niet ' +
+            'meegeteld. Zeg dat erbij als je het menu voorstelt.',
+        }
+      : {}),
+    ...(clashes.length > 0
+      ? {
+          clashNote:
+            `Te veel herhaling: een steringrediënt mag in maximaal ${MAX_RECIPES_PER_STAR} ` +
+            'recepten per menu voorkomen. Vervang een van de botsende recepten door een ' +
+            'ander en controleer opnieuw, vóórdat je het menu voorstelt. Alleen als de ' +
+            'gebruiker zelf zegt dat het niet erg is, mag het menu zo blijven.',
+        }
+      : {}),
+  };
+}
+
+async function handleSetRecipeStars(
+  ctx: AgentContext,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  const entries = input['recipes'];
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('Tool input missing required array field "recipes".');
+  }
+  const setBy = input['householdCorrection'] === true ? 'household' : 'agent';
+  const names = await recipeNameIndex(ctx);
+
+  const saved: unknown[] = [];
+  const keptHouseholdVersion: string[] = [];
+  for (const entry of entries as Array<Record<string, unknown>>) {
+    const recipeId = names.canonical(requireString(entry, 'recipeId'));
+    const stars = [...new Set(requireStringArray(entry, 'stars').map(cleanStar))].filter(
+      (s) => s.length > 0,
+    );
+    if (stars.length < 1 || stars.length > 3) {
+      throw new Error(`Recipe ${recipeId}: give 1–3 star ingredients, got ${stars.length}.`);
+    }
+    const written = upsertRecipeStars(ctx.db, {
+      recipeId,
+      recipeName: names.nameOf(recipeId),
+      stars,
+      setBy,
+    });
+    if (written) saved.push({ recipeId, stars });
+    else keptHouseholdVersion.push(recipeId);
+  }
+
+  return {
+    ok: true,
+    saved,
+    ...(keptHouseholdVersion.length > 0
+      ? {
+          keptHouseholdVersion,
+          note:
+            'De gebruiker heeft de sterren van deze recepten eerder zelf aangepast; ' +
+            'die versie blijft staan.',
+        }
+      : {}),
+  };
+}
+
+/**
+ * Recipe names by id, from the (cached) saved list. Also maps a bare id to the
+ * qualified one, so "6335ac…" and "picnic:6335ac…" share one stars entry.
+ */
+async function recipeNameIndex(ctx: AgentContext): Promise<{
+  canonical: (id: string) => string;
+  nameOf: (id: string) => string | null;
+}> {
+  const { recipes } = await ctx.recipes.listRecipes({ savedOnly: true });
+  const byId = new Map<string, { id: string; name: string }>();
+  for (const r of recipes) {
+    byId.set(r.id, r);
+    const bare = r.id.slice(r.id.indexOf(':') + 1);
+    if (!byId.has(bare)) byId.set(bare, r);
+  }
+  return {
+    canonical: (id) => byId.get(id)?.id ?? id,
+    nameOf: (id) => byId.get(id)?.name ?? null,
+  };
+}
 
 async function handleCheckProductGluten(
   ctx: AgentContext,
@@ -1619,6 +1866,14 @@ function requireString(input: Record<string, unknown>, key: string): string {
     throw new Error(`Tool input missing required string field "${key}".`);
   }
   return v;
+}
+
+function requireStringArray(input: Record<string, unknown>, key: string): string[] {
+  const v = input[key];
+  if (!Array.isArray(v) || v.length === 0 || v.some((s) => typeof s !== 'string')) {
+    throw new Error(`Tool input missing required string array field "${key}".`);
+  }
+  return v as string[];
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {

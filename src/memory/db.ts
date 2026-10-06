@@ -70,6 +70,7 @@ function migrate(db: DB): void {
  *   allergen_decisions        audit trail of every gluten verdict (transparency)
  *   product_allergen_overrides  per-product human corrections + deliberate
  *                               exceptions, which outrank all automatic layers
+ *   recipe_stars    the star ingredients of each recipe, for menu variety
  */
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS orders (
@@ -224,6 +225,23 @@ CREATE TABLE IF NOT EXISTS product_allergen_overrides (
   reason       TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (article_id, allergen)
+);
+
+-- The "star" ingredients of a recipe: the one to three things that make the
+-- dish what it is ("spinazie", "zalm"), in plain generic Dutch. Used to keep a
+-- week menu from serving the same star too often. Picnic's own "core" flag
+-- cannot do this job — it marks every pre-selected ingredient as core, lime
+-- and coriander included.
+--
+-- set_by separates a model's judgement from the household's: 'agent' rows may
+-- be refined later, a 'household' correction is never overwritten by the
+-- model.
+CREATE TABLE IF NOT EXISTS recipe_stars (
+  recipe_id   TEXT PRIMARY KEY,
+  recipe_name TEXT,
+  stars_json  TEXT NOT NULL,
+  set_by      TEXT NOT NULL CHECK (set_by IN ('agent','household')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `;
 

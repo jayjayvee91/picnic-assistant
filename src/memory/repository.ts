@@ -724,3 +724,85 @@ export function listAllergenOverrides(db: DB, limit = 50): AllergenOverride[] {
     createdAt: r.created_at,
   }));
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Recipe stars (menu variety)
+// ──────────────────────────────────────────────────────────────────────
+
+export type RecipeStarsSetBy = 'agent' | 'household';
+
+export interface RecipeStars {
+  recipeId: string;
+  recipeName: string | null;
+  stars: string[];
+  setBy: RecipeStarsSetBy;
+  updatedAt: string;
+}
+
+/** Stored stars for the given recipes. Recipes never judged are simply absent. */
+export function getRecipeStars(db: DB, recipeIds: string[]): Map<string, RecipeStars> {
+  const found = new Map<string, RecipeStars>();
+  const stmt = db.prepare(
+    `SELECT recipe_id, recipe_name, stars_json, set_by, updated_at
+     FROM recipe_stars WHERE recipe_id = ?`,
+  );
+  for (const id of recipeIds) {
+    const row = stmt.get(id) as
+      | {
+          recipe_id: string;
+          recipe_name: string | null;
+          stars_json: string;
+          set_by: RecipeStarsSetBy;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) continue;
+    found.set(id, {
+      recipeId: row.recipe_id,
+      recipeName: row.recipe_name,
+      stars: JSON.parse(row.stars_json) as string[],
+      setBy: row.set_by,
+      updatedAt: row.updated_at,
+    });
+  }
+  return found;
+}
+
+/**
+ * Store a recipe's stars. A household correction always wins; the agent's
+ * judgement never overwrites one. Returns false when the write was refused
+ * for that reason.
+ */
+export function upsertRecipeStars(db: DB, entry: Omit<RecipeStars, 'updatedAt'>): boolean {
+  const result = db
+    .prepare(
+      `INSERT INTO recipe_stars (recipe_id, recipe_name, stars_json, set_by)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(recipe_id) DO UPDATE SET
+         recipe_name = COALESCE(excluded.recipe_name, recipe_stars.recipe_name),
+         stars_json  = excluded.stars_json,
+         set_by      = excluded.set_by,
+         updated_at  = datetime('now')
+       WHERE recipe_stars.set_by = 'agent' OR excluded.set_by = 'household'`,
+    )
+    .run(entry.recipeId, entry.recipeName, JSON.stringify(entry.stars), entry.setBy);
+  return result.changes > 0;
+}
+
+/**
+ * Every star name in use, most common first. Handed to the agent so a new
+ * recipe reuses "spinazie" rather than inventing "verse spinazie" — counting
+ * only works if the same ingredient always gets the same name.
+ */
+export function listStarVocabulary(db: DB): string[] {
+  const rows = db.prepare(`SELECT stars_json FROM recipe_stars`).all() as Array<{
+    stars_json: string;
+  }>;
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    for (const star of JSON.parse(row.stars_json) as string[]) {
+      counts.set(star, (counts.get(star) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([star]) => star);
+}
