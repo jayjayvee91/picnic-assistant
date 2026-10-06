@@ -23,6 +23,7 @@
     "smoke:rotation": "tsx src/agent/rotation-smoke.ts",
     "smoke:cost": "tsx src/agent/cost-smoke.ts",
     "report:cost": "tsx src/agent/cost-report.ts",
+    "smoke:variety": "tsx src/agent/variety-smoke.ts",
     "verify:recipe": "tsx src/recipe/verify.ts",
     "verify:allergen": "tsx src/allergen/verify.ts",
     "capture:recipes": "tsx src/picnic/capture-recipes.ts",

@@ -77,3 +77,9 @@ jobs:
       # expensive again.
       - name: API cost checks
         run: npm run smoke:cost
+
+      # Menu variety: no star ingredient in more than two recipes of one menu.
+      # The counting and the rule that a household correction is never
+      # overwritten are both pinned here.
+      - name: Menu variety checks
+        run: npm run smoke:variety
