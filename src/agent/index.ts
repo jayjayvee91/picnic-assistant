@@ -11,6 +11,7 @@ export {
   IterationCapExceededError,
   DailySpendCapExceededError,
   MAX_TOOL_CALLS_PER_TURN,
+  takeBudgetWarning,
 } from './guards.js';
 export type { AgentContext } from './tools.js';
 export { AGENT_TOOLS } from './tools.js';

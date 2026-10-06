@@ -71,6 +71,13 @@ jobs:
       - name: Recipe rotation checks
         run: npm run smoke:rotation
 
+      # The API-cost measures (caching, fresh conversations, the step log, the
+      # budget warning) against a fake Claude. Same silent failure mode: a
+      # missing cache marker throws nothing, it just makes every weekly shop
+      # expensive again.
+      - name: API cost checks
+        run: npm run smoke:cost
+
       # Menu variety: no star ingredient in more than two recipes of one menu.
       # The counting and the rule that a household correction is never
       # overwritten are both pinned here.

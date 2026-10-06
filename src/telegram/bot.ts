@@ -27,6 +27,7 @@ import {
   AgentLoop,
   DailySpendCapExceededError,
   IterationCapExceededError,
+  takeBudgetWarning,
 } from '../agent/index.js';
 import {
   getTodayApiSpend,
@@ -42,6 +43,7 @@ import {
   setBotRunning,
   isOnboardingDone,
   getOrCreateChatState,
+  continueOrStartConversation,
   resetChatHistory,
 } from './state.js';
 import {
@@ -62,6 +64,8 @@ export interface TelegramBotOptions {
   db: DB;
   picnic: PicnicClient;
   agent: AgentLoop;
+  /** Daily Anthropic spend limit, for the 75% heads-up. */
+  dailySpendLimitEur: number;
   /** Env-supplied fallback when the meta table doesn't have an id. */
   envAllowedChatId: string | null;
 }
@@ -171,7 +175,8 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
     await ctx.reply(
       [
         `Status: ${running ? 'actief' : 'gepauzeerd'}`,
-        `API-uitgaven vandaag: €${spentToday.toFixed(4)}`,
+        `API-uitgaven vandaag: €${spentToday.toFixed(4)} (limiet €${opts.dailySpendLimitEur.toFixed(2)})`,
+        `Dit gesprek: €${chatState.spentEur.toFixed(4)} in ${chatState.steps} stappen`,
         `Auth-flow: ${chatState.authFlow}`,
         `Gespreksgeschiedenis: ${chatState.history.length} berichten`,
       ].join('\n'),
@@ -288,6 +293,7 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
     }
 
     const speakerName = ctx.from?.first_name ?? null;
+    continueOrStartConversation(ctx.chat.id);
 
     try {
       const result = await opts.agent.runTurn({
@@ -296,7 +302,11 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
         history: chatState.history,
       });
       chatState.history = result.updatedHistory;
+      chatState.spentEur += result.spentEur;
+      chatState.steps += result.apiCallCount;
       await sendChunked(ctx, result.reply);
+      const warning = takeBudgetWarning(opts.db, opts.dailySpendLimitEur);
+      if (warning) await ctx.reply(warning);
     } catch (err) {
       await handleAgentError(ctx, err);
     }
