@@ -4,7 +4,7 @@ How to operate the bot in production. Written for **future-Jeroen**, who may hav
 
 ## Quick reference
 
-**Where to run these:** The three "Telegram" rows are typed into the Telegram chat on your phone. **Every other row is a Linux command typed on the VPS shell over SSH** — NOT in PowerShell on your laptop. To get to the VPS shell from PowerShell:
+**Where to run these:** The "Telegram" rows are typed into the Telegram chat on your phone. **Every other row is a Linux command typed on the VPS shell over SSH** — NOT in PowerShell on your laptop. To get to the VPS shell from PowerShell:
 
 ```
 ssh jeroen@<your-server-ip>
@@ -22,6 +22,7 @@ ssh jeroen@<your-server-ip>
 | **Pause the bot from your phone** | Telegram (phone) | Send `/stop` |
 | **Resume the bot from your phone** | Telegram (phone) | Send `/start` |
 | **Check today's API spend** | Telegram (phone) | Send `/status` |
+| **Move the bot to another chat** (e.g. a household group) | Telegram (phone) | Send `/movechat` in the current chat — see [Moving the bot to another chat](#moving-the-bot-to-another-chat) |
 | **Deploy a code update** | VPS (SSH) | `bash ~/picnic-assistant/deploy/update.sh` |
 | **Make a manual DB backup** | VPS (SSH, in `~/picnic-assistant`) | `cp data/data.db data/backups/data-manual-$(date +%F).db` |
 
@@ -139,11 +140,21 @@ Within ~5 seconds you should see the startup banner. Leave the journal open and 
 
 ### Step I — Wire the chat
 
-On your phone, in Telegram, send the bot:
-1. `/chatid` — it replies with your chat id
-2. `/setchat` — it confirms; this chat is now the active one
+The bot prints a one-time claim token in the journal at startup when no chat is configured yet:
 
-You're live.
+```
+[telegram] BOOTSTRAP TOKEN: 1a2b3c4d5e6f7a8b
+```
+
+On your phone, in Telegram, open the chat the bot should live in (a private chat with the bot, or a group — see [Moving the bot to another chat](#moving-the-bot-to-another-chat) for the group setup) and send:
+
+```
+/setchat 1a2b3c4d5e6f7a8b
+```
+
+It confirms that this chat is now the active one. You're live.
+
+`/chatid` replies with a chat's id in any chat, if you'd rather set `TELEGRAM_ALLOWED_CHAT_ID` in `.env` instead.
 
 ---
 
@@ -196,6 +207,21 @@ Note: only `COMPLETED` deliveries are synced. An in-flight (`CURRENT`) order is
 deliberately not recorded — nothing in the codebase deletes an order, so a
 cancelled one would linger forever and skew the averages behind the weekly
 suggestions.
+
+### Moving the bot to another chat
+
+The bot answers exactly one chat. To move it — typically from your private chat to a group with the rest of the household — no server access is needed:
+
+1. **Turn off privacy mode** (once per bot). In @BotFather send `/setprivacy`, pick the bot, choose **Disable**. Without this, a bot in a group only sees commands and replies to itself, not ordinary messages. If the bot was already in the group, remove it and add it again so the change applies.
+2. **Add the bot to the new chat.**
+3. In the **current** chat, send `/movechat`. The bot replies with a `/setchat <token>` line.
+4. In the **new** chat, send that `/setchat <token>` line within 10 minutes.
+
+The bot confirms in the new chat and tells the old one it has moved. From then on everything — the Thursday nudge, Picnic re-auth prompts, error reports — goes to the new chat.
+
+Order history, the household profile, recipe rotation and gluten rules carry over; the running conversation starts fresh. Everyone in the chat has the same rights, including approving the cart and `/stop`.
+
+The token is single-use and lives in memory only: a restart cancels a pending move. A `/movechat` from any other chat is silently ignored. The moved-to chat is stored in the database, so it takes precedence over `TELEGRAM_ALLOWED_CHAT_ID` in `.env`.
 
 ### Updating the code
 
