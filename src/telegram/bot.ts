@@ -9,6 +9,9 @@
  *     or persisted in SQLite from a `/setchat` command.
  *   - The `/chatid` command works in ANY chat — it just echoes the chat id
  *     back so the user can wire it into config.
+ *   - `/movechat`, sent from the allowed chat, hands out a short-lived token
+ *     that lets `/setchat <token>` move the bot to another chat (e.g. from a
+ *     private chat to a household group).
  *   - `/stop`, `/start`, `/status` toggle the `bot_running` flag in SQLite.
  *   - `/sms` + a 6-digit code drive the Picnic re-auth state machine.
  *   - Every other message goes through the agent loop with the sender's
@@ -17,7 +20,7 @@
  * The whole bot is single-process; per-chat state lives in `state.ts`.
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Telegraf, type Context } from 'telegraf';
 import type { Message } from 'telegraf/types';
 
@@ -58,6 +61,16 @@ import { buildWeeklyNudge } from '../scheduler/index.js';
 /** Telegram's hard limit on message length. We split conservatively below it. */
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 const SAFE_CHUNK_LENGTH = 3500;
+
+/** How long a /movechat token stays redeemable. */
+const MOVE_TOKEN_TTL_MS = 10 * 60_000;
+
+/** Compare a supplied token without leaking a prefix match through timing. */
+function tokenMatches(supplied: string, expected: string): boolean {
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 export interface TelegramBotOptions {
   token: string;
@@ -102,15 +115,46 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
     );
   });
 
+  // Move token: issued by /movechat from the allowed chat, redeemed by
+  // `/setchat <token>` in the destination chat. Single-use, expires after
+  // MOVE_TOKEN_TTL_MS, and lives only in memory (a restart cancels a move).
+  let moveToken: { token: string; expiresAt: number } | null = null;
+
+  // /movechat — start moving the bot to a different chat. Registered above
+  // the guard middleware like /setchat, but explicitly restricted to the
+  // allowed chat: anyone else is silently ignored.
+  bot.command('movechat', async (ctx) => {
+    const current = getAllowedChatId(opts.db, opts.envAllowedChatId);
+    if (current === null || current !== ctx.chat.id) return;
+
+    const token = randomBytes(8).toString('hex');
+    moveToken = { token, expiresAt: Date.now() + MOVE_TOKEN_TTL_MS };
+    await ctx.reply(
+      [
+        'Verhuizen naar een andere chat (bijvoorbeeld een groep met je huisgenoten):',
+        '',
+        '1. Zet in @BotFather met /setprivacy de privacy-modus van deze bot op Disable. ' +
+          'Anders ziet de bot in een groep alleen commando’s, geen gewone berichten. ' +
+          'Zat de bot al in de groep? Verwijder hem en voeg hem opnieuw toe.',
+        '2. Voeg de bot toe aan de nieuwe chat.',
+        `3. Stuur daar binnen ${MOVE_TOKEN_TTL_MS / 60_000} minuten:`,
+        `/setchat ${token}`,
+        '',
+        'Daarna reageert de bot alleen nog in de nieuwe chat. Bestelgeschiedenis, ' +
+          'profiel en glutenregels gaan mee; dit gesprek begint daar opnieuw.',
+      ].join('\n'),
+    );
+  });
+
   // /setchat — persists the current chat as the allowed one.
   //   - First time, no allowed id set: requires the bootstrap token printed to
   //     stdout at process start. This is what stops a stranger from claiming
   //     the bot first.
-  //   - Subsequent calls: only honoured if the message comes from the already-
-  //     allowed chat (so a /setchat without args from that chat is a no-op
-  //     reconfirmation, harmless).
+  //   - From another chat while one is set: requires a live /movechat token.
+  //   - From the allowed chat itself: a harmless no-op reconfirmation.
   bot.command('setchat', async (ctx) => {
     const current = getAllowedChatId(opts.db, opts.envAllowedChatId);
+    const supplied = ctx.message.text.trim().split(/\s+/)[1] ?? '';
     if (current === null) {
       // First-time claim path.
       if (!bootstrapToken) {
@@ -119,11 +163,7 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
         );
         return;
       }
-      const args = ctx.message.text.trim().split(/\s+/).slice(1);
-      const supplied = args[0] ?? '';
-      // Constant-time-ish compare. The token is short, but avoid leaking
-      // length via early-exit on a short prefix match.
-      if (supplied.length !== bootstrapToken.length || supplied !== bootstrapToken) {
+      if (!tokenMatches(supplied, bootstrapToken)) {
         await ctx.reply(
           'Ongeldige of ontbrekende bootstrap-token. Gebruik: /setchat <token-uit-serverlogs>.',
         );
@@ -135,13 +175,33 @@ export function createBot(opts: TelegramBotOptions): Telegraf {
       return;
     }
 
-    // Reconfiguration path: only honour if message is FROM the current chat.
-    if (current !== ctx.chat.id) {
-      // Silently ignore — we don't want to confirm to a stranger that there's
-      // a bot listening elsewhere.
+    if (current === ctx.chat.id) {
+      await ctx.reply('Deze chat is al de actieve chat. Geen wijziging.');
       return;
     }
-    await ctx.reply('Deze chat is al de actieve chat. Geen wijziging.');
+
+    // Move path: a different chat redeeming a /movechat token. Anything else
+    // is silently ignored — we don't want to confirm to a stranger that
+    // there's a bot listening elsewhere.
+    if (moveToken === null || Date.now() > moveToken.expiresAt) {
+      moveToken = null;
+      return;
+    }
+    if (!tokenMatches(supplied, moveToken.token)) return;
+
+    moveToken = null;
+    setAllowedChatId(opts.db, ctx.chat.id);
+    console.log(`[telegram] allowed chat moved from ${current} to ${ctx.chat.id}`);
+    await ctx.reply(`Oké, deze chat (id ${ctx.chat.id}) is nu de actieve chat.`);
+    try {
+      await ctx.telegram.sendMessage(
+        current,
+        'De bot is verhuisd naar een andere chat en reageert hier niet meer.',
+      );
+    } catch (err) {
+      // Best-effort: the old chat may be gone or have blocked the bot.
+      console.warn('[telegram] could not notify the previous chat about the move:', err);
+    }
   });
 
   // Guard middleware: everything below this is restricted to the allowed chat.
