@@ -66,7 +66,7 @@ src/
 ├── memory/      SQLite store, household profile, purchase summary
 ├── picnic/      Picnic API adapter (decided in Step 2: MRVDH direct or mcp-picnic sidecar)
 ├── scheduler/   Weekly Thursday 20:00 nudge
-└── telegram/    Telegram bot, group chat restriction, /sms /stop /start /status commands
+└── telegram/    Telegram bot, single-chat restriction, /sms /stop /start /status /movechat commands
 ```
 
 ## Recipes
