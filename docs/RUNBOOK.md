@@ -23,7 +23,7 @@ ssh jeroen@<your-server-ip>
 | **Resume the bot from your phone** | Telegram (phone) | Send `/start` |
 | **Check today's API spend** | Telegram (phone) | Send `/status` |
 | **Move the bot to another chat** (e.g. a household group) | Telegram (phone) | Send `/movechat` in the current chat — see [Moving the bot to another chat](#moving-the-bot-to-another-chat) |
-| **Deploy a code update** | VPS (SSH) | `bash ~/picnic-assistant/deploy/update.sh` |
+| **Deploy a code update** | GitHub | Merge to `main` — deploys automatically ([Automatic deploys](#automatic-deploys)). By hand: `bash ~/picnic-assistant/deploy/update.sh` on the VPS |
 | **Make a manual DB backup** | VPS (SSH, in `~/picnic-assistant`) | `cp data/data.db data/backups/data-manual-$(date +%F).db` |
 
 ---
@@ -223,15 +223,59 @@ Order history, the household profile, recipe rotation and gluten rules carry ove
 
 The token is single-use and lives in memory only: a restart cancels a pending move. A `/movechat` from any other chat is silently ignored. The moved-to chat is stored in the database, so it takes precedence over `TELEGRAM_ALLOWED_CHAT_ID` in `.env`.
 
+### Automatic deploys
+
+Every push to `main` (in practice: merging a "Promote develop to main" PR) runs `.github/workflows/deploy.yml`. It runs the full CI suite first, then logs in to the VPS once and runs `deploy/update.sh`. The run fails, and GitHub emails you, if the checks fail, the pull fails, or the bot doesn't stay up for 20 seconds after the restart. Follow it under the repo's **Actions** tab, which also works from the GitHub mobile app.
+
+The login uses a dedicated deploy key that is locked to one command on the VPS: whoever holds it can run `update.sh` (deploy what is on `main`) and nothing else — no shell, no port forwarding. The runner also pins the server's host key, so it won't talk to an impostor at the same IP.
+
+**One-time setup** (VPS shell as `jeroen`, then the GitHub website):
+
+1. Make sure git can fetch without asking for credentials, since nobody is there to type them:
+   ```
+   cd ~/picnic-assistant && GIT_TERMINAL_PROMPT=0 git fetch origin && echo OK
+   ```
+   If this doesn't print `OK`, store a read-only credential first (a fine-grained GitHub token with *Contents: read* on this repo only, saved with `git config credential.helper store` and one `git fetch`).
+2. Create the deploy key and lock it to the update script:
+   ```
+   ssh-keygen -t ed25519 -N '' -C github-deploy -f ~/github-deploy-key
+   echo "restrict,command=\"bash /home/jeroen/picnic-assistant/deploy/update.sh\" $(cat ~/github-deploy-key.pub)" >> ~/.ssh/authorized_keys
+   ```
+3. Print the two values GitHub needs:
+   ```
+   cat ~/github-deploy-key                    # the private key, for VPS_SSH_KEY
+   cat /etc/ssh/ssh_host_ed25519_key.pub      # the server's host key, for VPS_HOST_KEY
+   ```
+4. On GitHub: repo **Settings → Secrets and variables → Actions → New repository secret**, four times:
+
+   | Name | Value |
+   |---|---|
+   | `VPS_HOST` | the VPS IP address |
+   | `VPS_USER` | `jeroen` |
+   | `VPS_SSH_KEY` | the whole private key from step 3, including the `-----BEGIN` and `-----END` lines |
+   | `VPS_HOST_KEY` | the `ssh-ed25519 AAAA…` line from step 3 |
+
+5. Delete the key files from the VPS — GitHub has the only copy now:
+   ```
+   shred -u ~/github-deploy-key ~/github-deploy-key.pub
+   ```
+6. Test it: **Actions → Deploy → Run workflow** (branch `main`). The log ends with the bot's last 20 journal lines.
+
+Until all four secrets exist, the workflow logs a warning and deploys nothing.
+
+**Revoking the key** (e.g. if a secret may have leaked): on the VPS, delete the line containing `github-deploy` from `~/.ssh/authorized_keys`. Deploys stop immediately; manual SSH is unaffected.
+
+**Gluten checks:** `verify:allergen` and `verify:recipe` need live Picnic data, so the automatic deploy can't run them. After a release that touches the gluten guard or recipe parsing, run them on the VPS by hand.
+
 ### Updating the code
 
-When you've merged changes into `main` on GitHub:
+Once [automatic deploys](#automatic-deploys) are set up, merging into `main` is enough. To deploy by hand instead (or if the automatic deploy failed and you've fixed the cause on the server):
 
 ```
 bash ~/picnic-assistant/deploy/update.sh
 ```
 
-It pulls, reinstalls deps if needed, and restarts the service. Last 20 log lines are printed so you can see the new process come up.
+It pulls, reinstalls deps if needed, restarts the service, and checks the bot is still up 20 seconds later. Last 20 log lines are printed so you can see the new process come up.
 
 ### Rotating the Picnic password
 

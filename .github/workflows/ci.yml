@@ -20,10 +20,14 @@ name: CI
 # listed under `push` — otherwise every commit on an open PR runs the whole
 # suite twice against the identical tree, doubling the wait and leaving two
 # indistinguishable "check" entries in the PR's status list.
+# `main` is covered by deploy.yml, which runs this suite through
+# `workflow_call` before it deploys — listing `main` here as well would run
+# the suite twice for every promotion.
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read

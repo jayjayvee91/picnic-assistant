@@ -1,0 +1,70 @@
+# Deploy `main` to the VPS on every push, once the full CI suite has passed.
+#
+# How it reaches the server: one SSH login with a dedicated deploy key. On the
+# VPS that key is pinned in authorized_keys to a forced command that runs
+# `deploy/update.sh` and nothing else, so the key stored here can only deploy
+# what is already on `main` — it cannot open a shell, forward ports or run any
+# other command. The server's host key is pinned too, so the runner refuses to
+# talk to anything that merely answers on the right IP.
+#
+# Setup (keys, secrets, the authorized_keys line): docs/RUNBOOK.md →
+# "Automatic deploys". Until the secrets exist, the deploy job only logs a
+# warning and succeeds, so merging this file deploys nothing by itself.
+#
+# Deliberately NOT here: `verify:allergen` / `verify:recipe`. They need live
+# Picnic data and a session, which CI does not have (see ci.yml). For a release
+# that touches the gluten guard or the recipe parser, run them on the VPS by
+# hand after the deploy.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  # Re-run a deploy by hand (Actions tab → Deploy → Run workflow), e.g. after
+  # fixing something on the server.
+  workflow_dispatch:
+
+# Never run two deploys at once, and never cancel one halfway through a
+# restart: a later push waits its turn instead.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deploy to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+        run: |
+          if [[ -z "$VPS_HOST" || -z "$VPS_USER" || -z "$VPS_SSH_KEY" || -z "$VPS_HOST_KEY" ]]; then
+            echo "::warning::Deploy secrets are not configured, so nothing was deployed. See docs/RUNBOOK.md, 'Automatic deploys'."
+            exit 0
+          fi
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s %s\n' "$VPS_HOST" "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+
+          # The server ignores whatever command we send and runs update.sh
+          # (forced command), whose exit code becomes this step's result.
+          ssh -T -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            "$VPS_USER@$VPS_HOST"
